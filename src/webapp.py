@@ -21,12 +21,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-import history
 import report
-from layout import DeptPaths, normalize_dept
+from layout import normalize_dept
+from publications import DEPT_RE, FileSource, PublicationSource
 
 log = logging.getLogger("webapp")
-DEPT_RE = re.compile(r"^(\d{2,3}|2[AB])$")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # Ressources DSFR servies sans mot de passe (le reste du site garde l'authentification).
 STATIC_URL = "/static/dsfr/"
@@ -102,10 +101,11 @@ def parse_depts(text: str) -> list[str] | None:
 
 
 def known_depts(root: Path) -> list[str]:
-    return sorted(p.name for p in (root / "reports").glob("*") if p.is_dir() and DEPT_RE.match(p.name))
+    return FileSource(root).depts()
 
 
-def home(root: Path, runner: Runner, message: str = "") -> str:
+def home(root: Path, runner: Runner, message: str = "", source: PublicationSource | None = None) -> str:
+    source = source or FileSource(root)
     run = runner.running()
     parts = ["<h1>Liens vers « Vos questions » sur les sites des mairies</h1>",
              '<p class="fr-text--lead">Recherche des mairies dont le site ou la page PanneauPocket renvoie vers '
@@ -149,25 +149,28 @@ def home(root: Path, runner: Runner, message: str = "") -> str:
             parts.append(f'<details class="fr-mb-4w"><summary>Journal de la dernière analyse</summary>'
                          f'<pre class="mlm-journal">{escape(runner.tail(60))}</pre></details>')
     rows = []
-    db = history.db_path(root)
-    for d in known_depts(root):
-        ch = history.changes(db, d)
-        cur = ch["courant"]
+    for d in source.depts():
+        pub = source.get(d, report=False, csv=False)
+        if pub is None:  # département disparu entre la liste et la lecture
+            continue
+        has_control = bool(pub.controle_date)
         sr = f'<span class="fr-sr-only"> du département {escape(d)}</span>'
-        csv_link = f'<a class="fr-link" href="/csv/{d}">CSV{sr}</a>' if DeptPaths(root, d).result_csv.exists() else ""
-        rows.append([f"<b>{escape(d)}</b>", escape(report.fr_date(cur["date"])) if cur else "—",
-                     str(cur["avec_lien"]) if cur else "—",
-                     escape(history.summary_line(ch)) if cur else "—",
+        csv_link = f'<a class="fr-link" href="/csv/{d}">CSV{sr}</a>' if pub.csv_present else ""
+        rows.append([f"<b>{escape(d)}</b>", escape(report.fr_date(pub.controle_date)) if has_control else "—",
+                     str(pub.avec_lien) if has_control else "—",
+                     escape(pub.resume_changements) if has_control else "—",
                      f'<a class="fr-link" href="/rapport/{d}">Compte rendu{sr}</a> {csv_link}'])
     parts.append("<h2>Résultats par département</h2>")
     parts.append(report.table(["Département", "Dernier contrôle", "Communes avec lien", "Changements", "Ouvrir"], rows,
                               "Aucun département analysé pour l'instant.", caption="Résultats par département"))
-    if (root / "resultats" / "liens_tous_departements.csv").exists():
+    if source.csv_all() is not None:
         parts.append('<p><a class="fr-link" href="/csv/tous">Télécharger le CSV de tous les départements</a></p>')
     return report.page("Liens Vos questions", "\n".join(parts))
 
 
-def make_handler(root: Path, runner: Runner, password: str):
+def make_handler(root: Path, runner: Runner, password: str, source: PublicationSource | None = None):
+    source = source or FileSource(root)
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             log.info("%s %s", self.address_string(), fmt % args)
@@ -218,17 +221,22 @@ def make_handler(root: Path, runner: Runner, password: str):
             if not self.authorized():
                 return
             if path == "/":
-                return self.send(200, home(root, runner))
+                return self.send(200, home(root, runner, source=source))
             m = re.fullmatch(r"/rapport/([0-9AB]{2,3})", path)
-            if m and m.group(1) in known_depts(root):
-                return self.send(200, report.render(DeptPaths(root, m.group(1)), history.db_path(root)))
+            if m:
+                pub = source.get(m.group(1), csv=False)
+                if pub is not None:
+                    return self.send(200, pub.report_html)
             m = re.fullmatch(r"/csv/([0-9AB]{2,3}|tous)", path)
             if m:
-                name = "tous_departements" if m.group(1) == "tous" else m.group(1)
-                f = root / "resultats" / f"liens_{name}.csv"
-                if f.exists():
-                    return self.send(200, f.read_bytes(), "text/csv; charset=utf-8",
-                                     {"Content-Disposition": f'attachment; filename="{f.name}"'})
+                if m.group(1) == "tous":
+                    data, name = source.csv_all(), "liens_tous_departements.csv"
+                else:
+                    pub = source.get(m.group(1), report=False)
+                    data, name = (pub.csv_bytes if pub and pub.csv_present else None), f"liens_{m.group(1)}.csv"
+                if data is not None:
+                    return self.send(200, data, "text/csv; charset=utf-8",
+                                     {"Content-Disposition": f'attachment; filename="{name}"'})
             self.send(404, report.page("Introuvable", '<h1>Page introuvable</h1><p><a href="/">Retour</a></p>'))
 
         def do_POST(self):  # noqa: N802
@@ -255,8 +263,9 @@ def make_handler(root: Path, runner: Runner, password: str):
     return Handler
 
 
-def serve(root: Path, host: str, port: int, password: str, runner: Runner | None = None) -> ThreadingHTTPServer:
+def serve(root: Path, host: str, port: int, password: str, runner: Runner | None = None,
+          source: PublicationSource | None = None) -> ThreadingHTTPServer:
     if host not in LOCAL_HOSTS and not password:
         raise ValueError("Pour partager l'application sur le réseau, définissez un mot de passe "
                          "(config.toml : mot_de_passe_web) ; sans mot de passe, elle n'écoute que sur ce poste.")
-    return ThreadingHTTPServer((host, port), make_handler(root, runner or Runner(root), password))
+    return ThreadingHTTPServer((host, port), make_handler(root, runner or Runner(root), password, source))
