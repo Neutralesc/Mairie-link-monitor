@@ -28,6 +28,7 @@ import report  # noqa: E402
 import store_pg  # noqa: E402
 import webapp  # noqa: E402
 from actions_runner import ActionsRunner  # noqa: E402
+from publications import SourceIndisponible  # noqa: E402
 
 log = logging.getLogger("api")
 OBLIGATOIRES = ("DATABASE_URL", "MLM_PASSWORD", "MLM_GH_TOKEN", "MLM_GH_REPO")
@@ -92,38 +93,35 @@ class _StoreAvecSchema:
 
 
 class _Lecture:
-    """Source de l'interface : PostgresSource, schéma vérifié une fois, pannes de base absorbées.
+    """Source de l'interface : PostgresSource, schéma vérifié une fois.
 
-    L'accueil reste utilisable (liste vide) si la base est en panne : aucune exception ne remonte à la page.
+    Une panne de base est signalée par SourceIndisponible (503 sur les pages de données, alerte sur l'accueil) ;
+    l'erreur d'origine n'est journalisée que par son type.
     """
 
     def __init__(self, url: str, schema: _SchemaUnique):
         self._source = store_pg.PostgresSource(url)
         self._schema = schema
 
-    def depts(self) -> list[str]:
+    def _appeler(self, operation: str, fonction, *args, **kwargs):
         try:
             self._schema.assurer()
-            return self._source.depts()
+            return fonction(*args, **kwargs)
         except Exception as exc:
-            _avertir("depts", exc)
-            return []
+            _avertir(operation, exc)
+            raise SourceIndisponible(operation) from None
+
+    def depts(self) -> list[str]:
+        return self._appeler("depts", self._source.depts)
 
     def get(self, dept: str, *, report: bool = True, csv: bool = True):
-        try:
-            self._schema.assurer()
-            return self._source.get(dept, report=report, csv=csv)
-        except Exception as exc:
-            _avertir("get", exc)
-            return None
+        return self._appeler("get", self._source.get, dept, report=report, csv=csv)
 
     def csv_all(self) -> bytes | None:
-        try:
-            self._schema.assurer()
-            return self._source.csv_all()
-        except Exception as exc:
-            _avertir("csv_all", exc)
-            return None
+        return self._appeler("csv_all", self._source.csv_all)
+
+    def has_csv_all(self) -> bool:
+        return self._appeler("has_csv_all", self._source.has_csv_all)
 
 
 def _handler_indisponible(titre: str, lignes: list[str]):
