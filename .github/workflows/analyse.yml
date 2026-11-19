@@ -1,0 +1,85 @@
+name: analyse
+
+# Déclenché par l'interface (Vercel) après l'insertion d'une ligne « file » dans la table analyses.
+# Sécurité : les inputs ne sont jamais interpolés dans un bloc run ; ils passent par env (valeurs entre guillemets).
+
+on:
+  workflow_dispatch:
+    inputs:
+      depts:
+        description: 'Département(s), ex. "60 80" ou "tous"'
+        type: string
+        required: true
+      reprise:
+        description: "Reprendre l'analyse précédente"
+        type: boolean
+        default: false
+      analysis_id:
+        description: "Identifiant de la ligne analyses"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: analyse
+  cancel-in-progress: false
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Dépendances
+        run: pip install -r requirements.txt
+
+      - name: Restauration de l'état précédent
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data
+            reports
+            resultats
+          key: mlm-etat-${{ github.run_id }}
+          restore-keys: mlm-etat-
+
+      - name: Analyse et publication
+        env:
+          DEPTS: ${{ inputs.depts }}
+          REPRISE: ${{ inputs.reprise }}
+          ANALYSIS_ID: ${{ inputs.analysis_id }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MLM_CONTACT: ${{ vars.MLM_CONTACT }}
+        run: |
+          flags=()
+          if [ "$REPRISE" = "true" ]; then
+            flags+=(--reprise)
+          fi
+          python src/ci_analyse.py run --analysis-id "$ANALYSIS_ID" --depts "$DEPTS" "${flags[@]}"
+
+      - name: Sauvegarde de l'état
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data
+            reports
+            resultats
+          key: mlm-etat-${{ github.run_id }}
+
+      - name: Marquage de l'analyse annulée
+        if: cancelled()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANALYSIS_ID: ${{ inputs.analysis_id }}
+        run: python src/ci_analyse.py fin --analysis-id "$ANALYSIS_ID" --statut annulee

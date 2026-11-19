@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     journal TEXT NOT NULL DEFAULT '',
     run_id TEXT NOT NULL DEFAULT ''
 );
+CREATE UNIQUE INDEX IF NOT EXISTS analyses_une_active ON analyses ((TRUE)) WHERE statut IN ('file','en_cours');
 """
 
 JOURNAL_MAX = 4000
@@ -168,6 +169,31 @@ def analysis_start(conn, depts: list[str], reprise: bool, run_id: str = "") -> i
     return int(row[0])
 
 
+def analysis_queue(conn, depts: list[str], reprise: bool) -> int | None:
+    """Ajoute une analyse en file d'attente ; None si une analyse est déjà active (index unique analyses_une_active)."""
+    try:
+        row = conn.execute(
+            "INSERT INTO analyses (departements, reprise, statut) VALUES (%s, %s, 'file') RETURNING id",
+            (",".join(depts), reprise),
+        ).fetchone()
+        conn.commit()
+    except _psycopg().errors.UniqueViolation:
+        conn.rollback()
+        return None
+    return int(row[0])
+
+
+def analysis_attach_run(conn, analysis_id: int, run_id: str) -> bool:
+    """Rattache le run GitHub à l'analyse : 'file' -> 'en_cours' ; 'en_cours' -> run_id seul ; statut final -> False."""
+    row = conn.execute(
+        "UPDATE analyses SET run_id = %s, statut = CASE WHEN statut = 'file' THEN 'en_cours' ELSE statut END "
+        "WHERE id = %s AND statut IN ('file','en_cours') RETURNING id",
+        (run_id, analysis_id),
+    ).fetchone()
+    conn.commit()
+    return row is not None
+
+
 def analysis_log(conn, analysis_id: int, text: str) -> None:
     conn.execute(
         "UPDATE analyses SET journal = right(journal || %s, %s) WHERE id = %s",
@@ -176,9 +202,22 @@ def analysis_log(conn, analysis_id: int, text: str) -> None:
     conn.commit()
 
 
-def analysis_end(conn, analysis_id: int, statut: str) -> None:
-    conn.execute("UPDATE analyses SET statut = %s, fin = now() WHERE id = %s", (statut, analysis_id))
+def analysis_end(conn, analysis_id: int, statut: str) -> bool:
+    """Passe l'analyse à `statut` seulement si elle n'est pas déjà finale. True si une ligne a changé."""
+    cur = conn.execute(
+        "UPDATE analyses SET statut = %s, fin = now() WHERE id = %s AND statut IN ('file','en_cours')",
+        (statut, analysis_id),
+    )
     conn.commit()
+    return cur.rowcount == 1
+
+
+def analysis_get(conn, analysis_id: int) -> dict | None:
+    cur = conn.execute("SELECT * FROM analyses WHERE id = %s", (analysis_id,))
+    row = cur.fetchone()
+    names = [d.name for d in cur.description]
+    conn.commit()
+    return None if row is None else dict(zip(names, row))
 
 
 def analysis_current(conn) -> dict | None:
