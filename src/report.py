@@ -1,6 +1,10 @@
-"""Lot 5 - Compte rendu HTML d'un département (fichier autonome, lisible sans le programme)."""
+"""Lot 5 - Compte rendu HTML d'un département (fichier autonome, lisible sans le programme).
+
+Pages en charte DSFR 1.15.4 (ressources locales dans src/static/dsfr, aucun CDN).
+"""
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -12,38 +16,60 @@ import history
 import results
 from layout import DeptPaths
 
-STYLE = """
-:root { --fond:#f6f7f9; --carte:#fff; --texte:#1c2430; --doux:#5a6472; --trait:#d9dee5; --accent:#1f5fbf;
-        --ok:#1d7a3a; --alerte:#b3261e; --attention:#8a5a00; }
-* { box-sizing: border-box; }
-body { margin:0; font:16px/1.5 system-ui, "Segoe UI", Arial, sans-serif; background:var(--fond); color:var(--texte); }
-main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
-h1 { font-size:1.6rem; margin:0 0 4px; } h2 { font-size:1.2rem; margin:32px 0 8px; }
-p.sous-titre { color:var(--doux); margin:0 0 24px; }
-.chiffres { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
-.chiffre { background:var(--carte); border:1px solid var(--trait); border-radius:8px; padding:12px 14px; }
-.chiffre b { display:block; font-size:1.7rem; line-height:1.2; } .chiffre span { color:var(--doux); font-size:.9rem; }
-.carte { background:var(--carte); border:1px solid var(--trait); border-radius:8px; padding:16px; margin-top:12px; }
-table { width:100%; border-collapse:collapse; background:var(--carte); font-size:.95rem; }
-th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--trait); vertical-align:top; }
-th { background:#eef1f5; font-weight:600; }
-td a { word-break:break-all; }
-a { color:var(--accent); } a:focus, button:focus, input:focus { outline:3px solid #9cc3ff; outline-offset:2px; }
-.ok { color:var(--ok); font-weight:600; } .alerte { color:var(--alerte); font-weight:600; }
-.attention { color:var(--attention); font-weight:600; }
-details { margin-top:12px; } summary { cursor:pointer; font-weight:600; }
-.note { color:var(--doux); font-size:.9rem; }
-.table-defile { overflow-x:auto; }
-.carte > h2:first-child { margin-top:0; }
-button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 16px; font-size:1rem; cursor:pointer; }
-"""
+STATIC_DSFR = Path(__file__).resolve().parent / "static" / "dsfr"
+STATIC_PREFIX_WEB = "/static/dsfr"  # chemin servi par webapp.py
+# Seule règle propre au projet : les journaux (pre) doivent passer à la ligne.
+STYLE_PROJET = ".mlm-journal { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }"
+MINISTERES = ("Ministères<br>Transition écologique<br>Aménagement du territoire<br>Transports<br>Ville et Logement")
+ALERTE_PAR_CLASSE = {"ok": "success", "alerte": "error", "attention": "warning"}
 
 
-def page(title: str, body: str, refresh: int | None = None) -> str:
+def header(accueil: str | None) -> str:
+    titre = '<p class="fr-header__service-title">Mairie Link Monitor</p>'
+    if accueil:
+        titre = f'<a href="{accueil}" title="Accueil - Mairie Link Monitor">{titre}</a>'
+    return ('<header role="banner" class="fr-header"><div class="fr-header__body"><div class="fr-container">'
+            '<div class="fr-header__body-row"><div class="fr-header__brand fr-enlarge-link">'
+            '<div class="fr-header__brand-top"><div class="fr-header__logo">'
+            f'<p class="fr-logo">{MINISTERES}</p></div></div>'
+            f'<div class="fr-header__service">{titre}'
+            '<p class="fr-header__service-tagline">Suivi des liens vers Vos Questions dans les sites de mairies</p>'
+            "</div></div></div></div></div></header>")
+
+
+def footer() -> str:
+    return ('<footer class="fr-footer" role="contentinfo" id="footer"><div class="fr-container"><div class="fr-footer__body">'
+            '<div class="fr-footer__content"><p class="fr-footer__content-desc">Outil de suivi des liens vers '
+            "Vos Questions dans les sites de mairies.</p></div></div></div></footer>")
+
+
+def page(title: str, body: str, refresh: int | None = None, static_prefix: str = STATIC_PREFIX_WEB) -> str:
+    sp = escape(static_prefix)
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
-    return (f'<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" '
-            f'content="width=device-width, initial-scale=1">{meta}<title>{escape(title)}</title><style>{STYLE}</style>'
-            f"</head><body><main>{body}</main></body></html>")
+    # Lien d'accueil seulement sur le web : un fichier écrit sur disque n'a pas de racine « / ».
+    accueil = "/" if static_prefix.startswith("/") else None
+    return (
+        '<!doctype html><html lang="fr" data-fr-scheme="system"><head>'
+        '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"{meta}<title>{escape(title)}</title>"
+        '<meta name="theme-color" content="#000091">'
+        f'<link rel="apple-touch-icon" href="{sp}/favicon/apple-touch-icon.png">'
+        f'<link rel="icon" href="{sp}/favicon/favicon.svg" type="image/svg+xml">'
+        f'<link rel="shortcut icon" href="{sp}/favicon/favicon.ico" type="image/x-icon">'
+        f'<link rel="manifest" href="{sp}/favicon/manifest.webmanifest">'
+        f'<link rel="stylesheet" href="{sp}/dsfr/dsfr.min.css">'
+        f"<style>{STYLE_PROJET}</style>"
+        "</head><body>"
+        '<div class="fr-skiplinks"><nav class="fr-container" role="navigation" aria-label="Accès rapide">'
+        '<ul class="fr-skiplinks__list"><li><a class="fr-link" href="#content">Aller au contenu</a></li></ul>'
+        "</nav></div>"
+        f"{header(accueil)}"
+        f'<main id="content" role="main"><div class="fr-container fr-my-4w">{body}</div></main>'
+        f"{footer()}"
+        f'<script type="module" src="{sp}/dsfr.module.min.js"></script>'
+        f'<script nomodule src="{sp}/dsfr.nomodule.min.js"></script>'
+        "</body></html>"
+    )
 
 
 def link(url: str) -> str:
@@ -56,10 +82,12 @@ def source(url: str) -> str:
 
 def table(headers: list[str], rows: list[list[str]], empty: str) -> str:
     if not rows:
-        return f'<p class="note">{escape(empty)}</p>'
+        return f'<p class="fr-hint-text">{escape(empty)}</p>'
     head = "".join(f'<th scope="col">{escape(h)}</th>' for h in headers)
     body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
-    return f'<div class="table-defile"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+    return ('<div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container">'
+            f'<div class="fr-table__content"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+            "</div></div></div></div>")
 
 
 def fr_date(iso: str) -> str:
@@ -69,7 +97,7 @@ def fr_date(iso: str) -> str:
         return iso
 
 
-def render(paths: DeptPaths, db: Path) -> str:
+def render(paths: DeptPaths, db: Path, static_prefix: str = STATIC_PREFIX_WEB) -> str:
     states = coverage.build(paths) if paths.inventory_communes.exists() else []
     try:
         links = {r["code_insee"]: r["url_page"] for r in results.collect(paths)}
@@ -85,16 +113,18 @@ def render(paths: DeptPaths, db: Path) -> str:
                (count(lambda s: s["etat"] == "lien trouvé (PanneauPocket)"), "dont via PanneauPocket"),
                (count(lambda s: s["etat"].startswith("aucun site")), "sans site trouvé"),
                (count(lambda s: s["etat"].startswith("site non lu")), "sites illisibles")]
+    chiffres = "".join(f'<div class="fr-col-6 fr-col-md-4 fr-col-lg-2"><div class="fr-callout">'
+                       f'<p class="fr-callout__title">{v}</p><p class="fr-callout__text">{escape(t)}</p>'
+                       "</div></div>" for v, t in figures)
     body = [f"<h1>Compte rendu – département {escape(paths.dept)}</h1>",
-            f'<p class="sous-titre">Liens vers vosquestions.ecologie-territoires.gouv.fr — contrôle du {escape(when)}</p>',
-            '<div class="chiffres">' + "".join(f'<div class="chiffre"><b>{v}</b><span>{escape(t)}</span></div>'
-                                               for v, t in figures) + "</div>"]
+            f'<p class="fr-text--lead">Liens vers vosquestions.ecologie-territoires.gouv.fr — contrôle du {escape(when)}</p>',
+            f'<div class="fr-grid-row fr-grid-row--gutters">{chiffres}</div>']
 
     body.append("<h2>Changements depuis le contrôle précédent</h2>")
     if ch["precedent"] is None:
-        body.append('<p class="note">Premier contrôle enregistré : les changements apparaîtront au prochain.</p>')
+        body.append('<p class="fr-hint-text">Premier contrôle enregistré : les changements apparaîtront au prochain.</p>')
     else:
-        body.append(f'<p class="note">Comparaison avec le contrôle du {escape(fr_date(ch["precedent"]["date"]))}.</p>')
+        body.append(f'<p class="fr-hint-text">Comparaison avec le contrôle du {escape(fr_date(ch["precedent"]["date"]))}.</p>')
         sections = [("nouveaux", "Nouveaux liens", "ok", ["Commune", "Page"], lambda r: [escape(r["nom_commune"]), link(r["page"])]),
                     ("disparus_confirmes", "Liens disparus (confirmé : site lu sans le lien)", "alerte",
                      ["Commune", "Page où il était"], lambda r: [escape(r["nom_commune"]), link(r["page"])]),
@@ -105,13 +135,20 @@ def render(paths: DeptPaths, db: Path) -> str:
                      lambda r: [escape(r["nom_commune"]), link(r["page"]), link(r["page_precedente"])])]
         for key, title, cls, headers, fmt in sections:
             rows = ch[key]
-            body.append(f'<h3 class="{cls}">{escape(title)} : {len(rows)}</h3>' if cls else f"<h3>{escape(title)} : {len(rows)}</h3>")
+            titre = f"{escape(title)} : {len(rows)}"
+            if cls:
+                body.append(f'<div class="fr-alert fr-alert--{ALERTE_PAR_CLASSE[cls]} fr-mb-2w">'
+                            f'<h3 class="fr-alert__title">{titre}</h3></div>')
+            else:
+                body.append(f"<h3>{titre}</h3>")
             if rows:
                 body.append(table(headers, [fmt(r) for r in rows], ""))
 
     body.append(f"<h2>Communes avec un lien ({len(links)})</h2>")
     body.append(table(["Code INSEE", "Commune", "Page", "Source"],
-                      [[escape(c), escape(names.get(c, "")), link(u), escape(source(u))] for c, u in sorted(links.items())],
+                      [[escape(c), escape(names.get(c, "")), link(u),
+                        f'<span class="fr-badge fr-badge--info fr-badge--sm">{escape(source(u))}</span>']
+                       for c, u in sorted(links.items())],
                       "Aucun lien trouvé."))
 
     unread = [s for s in states if s["analysee"] == "non" or s["etat"].startswith("site lu partiellement")]
@@ -120,13 +157,15 @@ def render(paths: DeptPaths, db: Path) -> str:
                 + table(["Code INSEE", "Commune", "État", "Détail"],
                         [[escape(s["code_insee"]), escape(s["nom_commune"]), escape(s["etat"]), escape(s["motif"])]
                          for s in unread], "Aucune.") + "</details>")
-    body.append('<p class="note">« Aucun lien » n\'est certain que pour un site lu en entier (dans les limites fixées) '
+    body.append('<p class="fr-hint-text">« Aucun lien » n\'est certain que pour un site lu en entier (dans les limites fixées) '
                 "ou une page PanneauPocket lue. Les sites construits en JavaScript ne sont pas lus.</p>")
-    return page(f"Compte rendu {paths.dept}", "\n".join(body))
+    return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix)
 
 
 def write(paths: DeptPaths, db: Path) -> Path:
     out = paths.results_dir / f"rapport_{paths.dept}.html"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(paths, db), encoding="utf-8")
+    # Fichier autonome : chemin relatif vers les ressources DSFR locales.
+    prefix = Path(os.path.relpath(STATIC_DSFR, out.parent.resolve())).as_posix()
+    out.write_text(render(paths, db, static_prefix=prefix), encoding="utf-8")
     return out

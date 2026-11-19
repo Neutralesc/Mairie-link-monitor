@@ -19,7 +19,7 @@ import time
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import history
 import report
@@ -28,6 +28,26 @@ from layout import DeptPaths, normalize_dept
 log = logging.getLogger("webapp")
 DEPT_RE = re.compile(r"^(\d{2,3}|2[AB])$")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# Ressources DSFR servies sans mot de passe (le reste du site garde l'authentification).
+STATIC_URL = "/static/dsfr/"
+STATIC_DIR = report.STATIC_DSFR
+STATIC_MIME = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2",
+               ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+               ".webmanifest": "application/manifest+json"}
+
+
+def static_file(rel: str) -> Path | None:
+    """Fichier de src/static/dsfr demandé, ou None (chemin suspect, type non servi, absent)."""
+    rel = unquote(rel)
+    if not rel or "\x00" in rel or "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/")):
+        return None
+    try:
+        f = (STATIC_DIR / rel).resolve()
+    except (OSError, ValueError):
+        return None
+    if f.suffix.lower() not in STATIC_MIME or not f.is_file() or not f.is_relative_to(STATIC_DIR):
+        return None
+    return f
 
 
 class Runner:
@@ -88,49 +108,53 @@ def known_depts(root: Path) -> list[str]:
 def home(root: Path, runner: Runner, message: str = "") -> str:
     run = runner.running()
     parts = ["<h1>Liens vers « Vos questions » sur les sites des mairies</h1>",
-             '<p class="sous-titre">Recherche des mairies dont le site ou la page PanneauPocket renvoie vers '
+             '<p class="fr-text--lead">Recherche des mairies dont le site ou la page PanneauPocket renvoie vers '
              "vosquestions.ecologie-territoires.gouv.fr</p>"]
     if message:
-        parts.append(f'<p class="carte alerte" role="alert">{escape(message)}</p>')
+        parts.append(f'<div class="fr-alert fr-alert--error fr-mb-4w" role="alert"><p>{escape(message)}</p></div>')
     if run:
         minutes = int((time.time() - runner.started) // 60)
-        parts.append(f'<section class="carte" aria-live="polite"><h2>Analyse en cours : {escape(runner.label)}</h2>'
+        parts.append(f'<section class="fr-mb-4w" aria-live="polite"><h2>Analyse en cours : {escape(runner.label)}</h2>'
                      f"<p>Démarrée il y a {minutes} min. Cette page se met à jour toute seule.</p>"
-                     f'<pre style="white-space:pre-wrap;font-size:.85rem">{escape(runner.tail())}</pre>'
-                     '<form method="post" action="/arreter"><button type="submit">Arrêter l\'analyse</button></form>'
-                     '<p class="note">Une analyse arrêtée peut être reprise : cochez « Reprendre » au prochain lancement.</p>'
+                     f'<pre class="mlm-journal">{escape(runner.tail())}</pre>'
+                     '<form method="post" action="/arreter"><button class="fr-btn fr-btn--secondary" type="submit">'
+                     "Arrêter l'analyse</button></form>"
+                     '<p class="fr-hint-text">Une analyse arrêtée peut être reprise : cochez « Reprendre » au prochain lancement.</p>'
                      "</section>")
     else:
-        parts.append('<section class="carte"><h2>Lancer une analyse</h2>'
+        parts.append('<section class="fr-mb-4w"><h2>Lancer une analyse</h2>'
                      '<form method="post" action="/lancer">'
-                     '<p><label for="dept"><b>Département(s)</b></label><br>'
-                     '<input id="dept" name="dept" required placeholder="ex : 60   ou   60 80 2A" '
-                     'style="font-size:1rem;padding:6px 8px;width:min(320px,100%)" aria-describedby="aide-dept"><br>'
-                     '<span id="aide-dept" class="note">Codes séparés par des espaces. « tous » = France entière (très long).</span></p>'
-                     '<p><label><input type="checkbox" name="reprise" value="1"> Reprendre l\'analyse précédente '
-                     "(ne refait que ce qui manque ou a échoué : plus rapide)</label></p>"
-                     '<p><label><input type="checkbox" name="confirmer_tous" value="1"> Je confirme l\'analyse de toute la '
-                     "France (si « tous »)</label></p>"
-                     '<button type="submit">Lancer</button></form>'
-                     '<p class="note">Durée indicative : de quelques minutes à une heure par département.</p></section>')
+                     '<div class="fr-input-group"><label for="dept"><span class="fr-label">Département(s)</span></label>'
+                     '<input class="fr-input" id="dept" name="dept" type="text" required '
+                     'placeholder="ex : 60   ou   60 80 2A" aria-describedby="aide-dept">'
+                     '<span id="aide-dept" class="fr-hint-text">Codes séparés par des espaces. « tous » = France entière (très long).</span>'
+                     "</div>"
+                     '<div class="fr-checkbox-group"><input id="reprise" name="reprise" type="checkbox" value="1">'
+                     '<label class="fr-label" for="reprise">Reprendre l\'analyse précédente '
+                     "(ne refait que ce qui manque ou a échoué : plus rapide)</label></div>"
+                     '<div class="fr-checkbox-group"><input id="confirmer_tous" name="confirmer_tous" type="checkbox" value="1">'
+                     '<label class="fr-label" for="confirmer_tous">Je confirme l\'analyse de toute la '
+                     "France (si « tous »)</label></div>"
+                     '<button class="fr-btn" type="submit">Lancer</button></form>'
+                     '<p class="fr-hint-text">Durée indicative : de quelques minutes à une heure par département.</p></section>')
         if runner.tail():
-            parts.append(f'<details class="carte"><summary>Journal de la dernière analyse</summary>'
-                         f'<pre style="white-space:pre-wrap;font-size:.85rem">{escape(runner.tail(60))}</pre></details>')
+            parts.append(f'<details class="fr-mb-4w"><summary>Journal de la dernière analyse</summary>'
+                         f'<pre class="mlm-journal">{escape(runner.tail(60))}</pre></details>')
     rows = []
     db = history.db_path(root)
     for d in known_depts(root):
         ch = history.changes(db, d)
         cur = ch["courant"]
-        csv_link = f'<a href="/csv/{d}">CSV</a>' if DeptPaths(root, d).result_csv.exists() else ""
+        csv_link = f'<a class="fr-link" href="/csv/{d}">CSV</a>' if DeptPaths(root, d).result_csv.exists() else ""
         rows.append([f"<b>{escape(d)}</b>", escape(report.fr_date(cur["date"])) if cur else "—",
                      str(cur["avec_lien"]) if cur else "—",
                      escape(history.summary_line(ch)) if cur else "—",
-                     f'<a href="/rapport/{d}">Compte rendu</a> {csv_link}'])
+                     f'<a class="fr-link" href="/rapport/{d}">Compte rendu</a> {csv_link}'])
     parts.append("<h2>Résultats par département</h2>")
     parts.append(report.table(["Département", "Dernier contrôle", "Communes avec lien", "Changements", "Ouvrir"], rows,
                               "Aucun département analysé pour l'instant."))
     if (root / "resultats" / "liens_tous_departements.csv").exists():
-        parts.append('<p><a href="/csv/tous">Télécharger le CSV de tous les départements</a></p>')
+        parts.append('<p><a class="fr-link" href="/csv/tous">Télécharger le CSV de tous les départements</a></p>')
     return report.page("Liens Vos questions", "\n".join(parts), refresh=10 if run else None)
 
 
@@ -171,10 +195,19 @@ def make_handler(root: Path, runner: Runner, password: str):
         def redirect(self, location: str = "/"):
             self.send(303, "", extra={"Location": location})
 
+        def serve_static(self, path: str):
+            f = static_file(path[len(STATIC_URL):])
+            if f is None:
+                return self.send(404, "Introuvable", "text/plain; charset=utf-8")
+            return self.send(200, f.read_bytes(), STATIC_MIME[f.suffix.lower()],
+                             {"Cache-Control": "public, max-age=86400"})
+
         def do_GET(self):  # noqa: N802
+            path = urlsplit(self.path).path
+            if path.startswith(STATIC_URL):  # sans mot de passe : ressources DSFR uniquement
+                return self.serve_static(path)
             if not self.authorized():
                 return
-            path = urlsplit(self.path).path
             if path == "/":
                 return self.send(200, home(root, runner))
             m = re.fullmatch(r"/rapport/([0-9AB]{2,3})", path)
