@@ -119,6 +119,9 @@ class _Lecture:
     def get(self, dept: str, *, report: bool = True, csv: bool = True):
         return self._appeler("get", self._source.get, dept, report=report, csv=csv)
 
+    def liens(self, dept: str | None = None) -> list[dict]:
+        return self._appeler("liens", self._source.liens, dept)
+
     def csv_all(self) -> bytes | None:
         return self._appeler("csv_all", self._source.csv_all)
 

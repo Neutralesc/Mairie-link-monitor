@@ -8,11 +8,12 @@ module est absent. Aucune URL ni secret n'est écrit ici : l'URL vient toujours 
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from publications import CSV_TOUS, Publication, PublicationSource
+from publications import CSV_TOUS, Publication, PublicationSource, trier_liens
 
 if TYPE_CHECKING:  # pragma: no cover
     import psycopg
@@ -27,8 +28,10 @@ CREATE TABLE IF NOT EXISTS publications (
     csv_bytes BYTEA NOT NULL DEFAULT ''::bytea,
     csv_present BOOLEAN NOT NULL DEFAULT FALSE,
     resume_changements TEXT NOT NULL DEFAULT '',
+    liens_json TEXT NOT NULL DEFAULT '[]',
     publie_le TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE publications ADD COLUMN IF NOT EXISTS liens_json TEXT NOT NULL DEFAULT '[]';
 CREATE TABLE IF NOT EXISTS publication_globale (
     nom TEXT PRIMARY KEY,
     contenu BYTEA NOT NULL,
@@ -52,8 +55,8 @@ CONNECT_TIMEOUT_S = 5  # délai de connexion : une base injoignable ne bloque pa
 
 _UPSERT_DEPT = """
 INSERT INTO publications (dept, controle_date, communes, avec_lien, report_html, csv_bytes, csv_present,
-                          resume_changements, publie_le)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                          resume_changements, liens_json, publie_le)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (dept) DO UPDATE SET
     controle_date = EXCLUDED.controle_date,
     communes = EXCLUDED.communes,
@@ -62,6 +65,7 @@ ON CONFLICT (dept) DO UPDATE SET
     csv_bytes = EXCLUDED.csv_bytes,
     csv_present = EXCLUDED.csv_present,
     resume_changements = EXCLUDED.resume_changements,
+    liens_json = EXCLUDED.liens_json,
     publie_le = now()
 """
 
@@ -97,6 +101,7 @@ def publish(source: PublicationSource, conn, only: list[str] | None = None) -> d
 
     Les départements déjà publiés et absents de la source ne sont pas supprimés.
     """
+    ensure_schema(conn)       # idempotent : une base publiée avant l'ajout d'une colonne est mise à niveau ici
     restreint = None if only is None or list(only) == ["all"] else set(only)
     published: list[str] = []
     for dept in source.depts():
@@ -105,9 +110,11 @@ def publish(source: PublicationSource, conn, only: list[str] | None = None) -> d
         pub = source.get(dept)
         if pub is None:
             continue
+        liens_json = json.dumps([{"code_insee": r["code_insee"], "nom_commune": r["nom_commune"],
+                                  "url_page": r["url_page"]} for r in source.liens(dept)], ensure_ascii=False)
         try:
             conn.execute(_UPSERT_DEPT, (pub.dept, pub.controle_date, pub.communes, pub.avec_lien, pub.report_html,
-                                        pub.csv_bytes, pub.csv_present, pub.resume_changements))
+                                        pub.csv_bytes, pub.csv_present, pub.resume_changements, liens_json))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -188,6 +195,29 @@ class PostgresSource:
         with self._connect() as conn:
             row = conn.execute(f"SELECT {cols} FROM publications WHERE dept = %s", (dept,)).fetchone()
         return None if row is None else self._publication(row)
+
+    def liens(self, dept: str | None = None) -> list[dict]:
+        """Communes avec lien, relues de liens_json (une requête). JSON invalide ou non-liste : département ignoré."""
+        with self._connect() as conn:
+            if dept is None:
+                rows = conn.execute("SELECT dept, liens_json FROM publications ORDER BY dept").fetchall()
+            else:
+                rows = conn.execute("SELECT dept, liens_json FROM publications WHERE dept = %s ORDER BY dept",
+                                    (dept,)).fetchall()
+        sortie: list[dict] = []
+        for d, brut in rows:
+            try:
+                entrees = json.loads(brut)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(entrees, list):
+                continue
+            for e in entrees:
+                if not isinstance(e, dict):
+                    continue
+                sortie.append({"dept": d, "code_insee": str(e.get("code_insee") or ""),
+                               "nom_commune": str(e.get("nom_commune") or ""), "url_page": str(e.get("url_page") or "")})
+        return trier_liens(sortie)
 
     def csv_all(self) -> bytes | None:
         with self._connect() as conn:
