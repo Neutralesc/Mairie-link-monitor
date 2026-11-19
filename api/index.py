@@ -1,7 +1,9 @@
-"""Point d'entrée Vercel (runtime Python « handler ») de l'interface web Mairie Link Monitor.
+"""Point d'entrée Vercel de l'interface web Mairie Link Monitor.
 
-Vercel appelle la classe `handler` (dérivée de BaseHTTPRequestHandler) pour chaque requête non statique (voir
-vercel.json). Les ressources DSFR sont servies par Vercel depuis public/ ; le crawl n'a pas lieu ici.
+Vercel (framework Python) appelle `app`, application WSGI définie en bas de ce fichier : elle rejoue chaque requête
+dans `handler` (classe dérivée de BaseHTTPRequestHandler, construite par webapp.make_handler). Pas de réécriture dans
+vercel.json : le mode framework dirige toutes les requêtes non statiques vers `app`, avec leur chemin d'origine.
+Les ressources DSFR sont servies par Vercel depuis public/ ; le crawl n'a pas lieu ici.
 
 Configuration (variables d'environnement, jamais de valeur dans les pages ni dans les journaux) :
   obligatoires : DATABASE_URL, MLM_PASSWORD, MLM_GH_TOKEN, MLM_GH_REPO (« propriétaire/dépôt »)
@@ -170,3 +172,82 @@ def _construire():
 
 
 handler = _construire()
+
+
+# ----------------------------------------------------------------- adaptateur WSGI
+# Vercel (mode « framework Python ») attend un `app` WSGI écrit explicitement dans le fichier. Il ne lit pas les
+# requêtes sur une socket : on rejoue chaque requête dans le gestionnaire existant, avec une fausse socket en mémoire,
+# sans changer la logique de webapp.py. Le chemin utilisé est celui de la requête d'origine (PATH_INFO).
+import io  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+TAILLE_MAX_CORPS = 100_000
+
+
+class _FausseSocket:
+    def __init__(self, donnees: bytes):
+        self._entree = io.BytesIO(donnees)
+        self.sortie = io.BytesIO()
+
+    def makefile(self, mode="r", *_args, **_kwargs):
+        return self._entree if "r" in mode else self.sortie
+
+    def sendall(self, donnees):
+        self.sortie.write(donnees)
+
+    def settimeout(self, _t):
+        pass
+
+    def setsockopt(self, *_args):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FauxServeur:
+    server_name = "vercel"
+    server_port = 443
+
+
+def _requete_brute(environ) -> bytes:
+    methode = environ.get("REQUEST_METHOD", "GET")
+    chemin = quote(environ.get("PATH_INFO", "/") or "/", safe="/%:@!$&'()*+,;=-._~")
+    if environ.get("QUERY_STRING"):
+        chemin += "?" + environ["QUERY_STRING"]
+    en_tetes = []
+    for cle, valeur in environ.items():
+        if cle.startswith("HTTP_"):
+            en_tetes.append((cle[5:].replace("_", "-").title(), str(valeur)))
+        elif cle in ("CONTENT_TYPE", "CONTENT_LENGTH") and valeur:
+            en_tetes.append((cle.replace("_", "-").title(), str(valeur)))
+    try:
+        taille = max(0, int(environ.get("CONTENT_LENGTH") or 0))
+    except ValueError:
+        taille = 0
+    corps = environ["wsgi.input"].read(min(taille, TAILLE_MAX_CORPS)) if taille and "wsgi.input" in environ else b""
+    tete = f"{methode} {chemin} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in en_tetes) + "\r\n"
+    return tete.encode("latin-1", "replace") + corps
+
+
+def app(environ, start_response):
+    """Application WSGI : rejoue la requête dans `handler` (BaseHTTPRequestHandler) et renvoie sa réponse."""
+    socket = _FausseSocket(_requete_brute(environ))
+    adresse = (environ.get("HTTP_X_FORWARDED_FOR", "").split(",")[0].strip() or environ.get("REMOTE_ADDR", "0.0.0.0"), 0)
+    try:
+        handler(socket, adresse, _FauxServeur())
+    except Exception as exc:  # noqa: BLE001 - jamais de trace ni de message dans la réponse
+        _avertir("requete", exc)
+        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"Erreur interne."]
+    brut = socket.sortie.getvalue()
+    tete, _, corps = brut.partition(b"\r\n\r\n")
+    lignes = tete.decode("latin-1").split("\r\n")
+    try:
+        statut = lignes[0].split(" ", 1)[1]
+    except IndexError:
+        start_response("502 Bad Gateway", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"Reponse invalide."]
+    entetes = [tuple(ligne.split(": ", 1)) for ligne in lignes[1:] if ": " in ligne]
+    start_response(statut, entetes)
+    return [corps]
