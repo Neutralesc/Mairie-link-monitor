@@ -72,6 +72,7 @@ RETRY_STATUTS = {"erreur_acces", "robots_indisponible"}
 # en erreur DNS le 28/10) ; une seconde tentative est donc faite comme pour les autres erreurs passagères.
 TRANSIENT_MARKERS = ("timeout", "erreur_connexion", "http_5xx", "bloque_ou_limite", "erreur_dns")
 DNS_ATTEMPTS = 3
+NXDOMAIN_PREFIX = "nom inexistant"    # motif de resolve() pour un nom inexistant (EAI_NONAME / 11001)
 PP_VILLE_RE = re.compile(r"^/ville/(\d+)-([a-z0-9-]+)-(\d{5})/?$")   # page commune PanneauPocket
 PP_HOST = "app.panneaupocket.com"
 JS_REDIRECT_RE = re.compile(r"""location(?:\.href)?\s*=\s*["']([^"']+)|location\.(?:replace|assign)\(\s*["']([^"']+)""")
@@ -505,6 +506,17 @@ class SiteResult:
     dept: str = ""
 
 
+def new_row(site: dict, attempt: int = 1) -> dict:
+    """Ligne de base d'un site (utilisée par crawl_site, et en repli si crawl_site lève une exception)."""
+    return {"code_insee": site["code_insee"], "nom_commune": site["nom_commune"], "site_url": site["start_url"],
+            "confiance_lot2": site["confiance_lot2"], "url_utilisee": "", "confiance_finale": "", "statut_crawl": "",
+            "motif": "", "ssl_invalide": int(site["ssl_invalide"]), "pages_visitees": 0, "requetes_http": 0,
+            "pages_en_erreur": 0, "pages_interdites_robots": 0, "liens_trouves": 0, "profondeur_max_atteinte": 0,
+            "limite_pages_atteinte": 0, "limite_profondeur_atteinte": 0, "pages_tronquees": 0, "tentatives": attempt,
+            "processus": os.getpid(), "duree_s": 0, "erreur": "", "pages_plateformes": "", "accueil_diag": "",
+            "variantes_ignorees": 0, "date_controle": datetime.now(timezone.utc).isoformat()}
+
+
 async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict, attempt: int = 1) -> SiteResult:
     """Explore un site en largeur et S'ARRÊTE au premier lien trouvé."""
     secure, insecure = clients
@@ -512,17 +524,11 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
     started = time.monotonic()
     start = site["start_url"]
     site_host = norm_host(urlsplit(start).hostname)
-    now = datetime.now(timezone.utc).isoformat()
     req_timeout = opts["timeout"] * (1.5 if attempt > 1 else 1.0)
     if attempt > 1:                                            # deuxième tentative : plus lente
         throttle.per_host[site_host] = max(throttle.per_host.get(site_host, throttle.delay), throttle.delay * 2)
-    row = {"code_insee": site["code_insee"], "nom_commune": site["nom_commune"], "site_url": start,
-           "confiance_lot2": site["confiance_lot2"], "url_utilisee": "", "confiance_finale": "", "statut_crawl": "",
-           "motif": "", "ssl_invalide": int(site["ssl_invalide"]), "pages_visitees": 0, "requetes_http": 0,
-           "pages_en_erreur": 0, "pages_interdites_robots": 0, "liens_trouves": 0, "profondeur_max_atteinte": 0,
-           "limite_pages_atteinte": 0, "limite_profondeur_atteinte": 0, "pages_tronquees": 0, "tentatives": attempt,
-           "processus": os.getpid(), "duree_s": 0, "erreur": "", "pages_plateformes": "", "accueil_diag": "",
-           "variantes_ignorees": 0, "date_controle": now}
+    row = new_row(site, attempt)
+    now = row["date_controle"]
     links: list[dict] = []
     platform_pages: list[str] = []
     robots_cache: dict[str, tuple] = {}
@@ -729,7 +735,10 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
     try:
         await asyncio.wait_for(body(), timeout=opts["site_timeout"])
     except asyncio.TimeoutError:
-        row.update(statut_crawl="explore_partiel", motif="durée maximale par site atteinte")
+        if row["pages_visitees"] == 0:
+            row.update(statut_crawl="erreur_acces", motif="durée maximale par site atteinte sans page lue")
+        else:
+            row.update(statut_crawl="explore_partiel", motif="durée maximale par site atteinte")
     row["liens_trouves"] = len(links)
     row["pages_plateformes"] = " | ".join(platform_pages[:5])
     row["duree_s"] = round(time.monotonic() - started, 1)
@@ -770,7 +779,11 @@ async def resolve(host: str, timeout: float = 5.0) -> str:
         return ""
     except asyncio.TimeoutError:
         return "délai de résolution dépassé"
-    except OSError as exc:
+    except socket.gaierror as exc:
+        if exc.errno in (socket.EAI_NONAME, 11001):          # nom inexistant : inutile de réessayer
+            return NXDOMAIN_PREFIX + " : " + f"{type(exc).__name__}: {exc}"[:130]
+        return f"{type(exc).__name__}: {exc}"[:150]
+    except (OSError, UnicodeError) as exc:                   # ex. « a..fr » : UnicodeEncodeError
         return f"{type(exc).__name__}: {exc}"[:150]
 
 
@@ -790,6 +803,8 @@ async def prefetch_dns(url: str, sem: asyncio.Semaphore, pause: float) -> str:
             err = await resolve(host)
         if not err:
             return ""
+        if err.startswith(NXDOMAIN_PREFIX):                  # nom inexistant : pas de nouvelle tentative
+            break
         if attempt < DNS_ATTEMPTS - 1:
             await asyncio.sleep(pause * (attempt + 1))
     return err
@@ -818,6 +833,13 @@ def tune_runtime(concurrency: int) -> None:
         anyio.to_thread.current_default_thread_limiter().total_tokens = max(40, min(1000, concurrency * 2))
     except Exception:  # noqa: BLE001 - optimisation facultative
         pass
+
+
+def site_internal_error(site: dict, attempt: int, exc: Exception) -> SiteResult:
+    """Résultat de repli pour un site dont l'exploration a levé une exception (la ligne de base est conservée)."""
+    row = new_row(site, attempt)
+    row.update(statut_crawl="erreur_acces", motif=f"erreur interne : {type(exc).__name__}", erreur=str(exc)[:200])
+    return SiteResult(row, [], site.get("_dept", ""))
 
 
 async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None, on_result=None,
@@ -869,13 +891,19 @@ async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None,
             pause = opts.get("dns_retry_pause", 2.0)
             dns_err = await prefetch_dns(site["start_url"], dns_sem, pause) if use_dns_prefetch else ""
             async with sem:
-                res = await crawl_site(site, (secure, insecure), throttle, opts)
+                try:
+                    res = await crawl_site(site, (secure, insecure), throttle, opts)
+                except Exception as exc:  # noqa: BLE001 - un site défaillant ne doit pas arrêter le worker
+                    res = site_internal_error(site, 1, exc)
                 if opts.get("retry_failed", True) and res.row["statut_crawl"] in RETRY_STATUTS and \
                         any(m in res.row["motif"] for m in TRANSIENT_MARKERS + ("HTTP 5", "HTTP 429")):
                     await asyncio.sleep(opts.get("retry_pause", 3.0))     # erreur passagère : 2e tentative, plus lente
                     if use_dns_prefetch and "erreur_dns" in res.row["motif"]:
                         dns_err = await prefetch_dns(site["start_url"], dns_sem, pause * 2)
-                    res = await crawl_site(site, (secure, insecure), throttle, opts, attempt=2)
+                    try:
+                        res = await crawl_site(site, (secure, insecure), throttle, opts, attempt=2)
+                    except Exception as exc:  # noqa: BLE001
+                        res = site_internal_error(site, 2, exc)
             if dns_err and "erreur_dns" in res.row["motif"]:
                 res.row["erreur"] = f"DNS : {dns_err}"[:200]
             results.append(res)
