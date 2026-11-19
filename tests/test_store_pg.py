@@ -250,5 +250,172 @@ class SuiviAnalysesPgTests(sp.PgSchemaTestCase):
         self.assertEqual(store_pg.analysis_get(self.conn, aid)["statut"], "en_cours")
 
 
+# ----------------------------------------------------------------- correctifs de fiabilité (lots A et B)
+
+from publications import CSV_TOUS  # noqa: E402
+
+try:
+    import psycopg  # noqa: F401
+except ImportError:
+    psycopg = None
+
+
+@unittest.skipIf(bool(sp.RAISON_PG), sp.RAISON_PG)
+class PublicationSelectivePgTests(sp.PgSchemaTestCase):
+    """publish(only=...) : seuls les départements demandés sont écrits ; le CSV global l'est toujours."""
+
+    def setUp(self):
+        self.vider_tables()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        sp.construire_racine(self.root)                       # 02, 60 et 80 + CSV global
+        self.conn = store_pg.connect(self.url)
+        self.addCleanup(self.conn.close)
+
+    def publier(self, only):
+        return store_pg.publish(FileSource(self.root), self.conn, only=only)
+
+    def publies(self):
+        pg = store_pg.PostgresSource(self.url)
+        return pg.depts(), pg.csv_all()
+
+    def test_only_60_publie_seulement_60_et_le_csv_global(self):
+        self.assertEqual(self.publier(["60"]), {"departements": ["60"], "csv_global": True})
+        depts, csv = self.publies()
+        self.assertEqual(depts, ["60"])
+        self.assertEqual(csv, sp.CSV_TOUS_OCTETS)
+
+    def test_only_all_publie_tous_les_departements(self):
+        self.assertEqual(self.publier(["all"])["departements"], ["02", "60", "80"])
+        self.assertEqual(self.publies()[0], ["02", "60", "80"])
+
+    def test_only_none_publie_tous_les_departements(self):
+        self.assertEqual(self.publier(None)["departements"], ["02", "60", "80"])
+        self.assertEqual(self.publies()[0], ["02", "60", "80"])
+
+    def test_only_departement_absent_de_la_racine_publie_seulement_le_csv_global(self):
+        self.assertEqual(self.publier(["99"]), {"departements": [], "csv_global": True})
+        self.assertEqual(self.publies(), ([], sp.CSV_TOUS_OCTETS))
+
+
+@unittest.skipIf(bool(sp.RAISON_PG), sp.RAISON_PG)
+class AnnulationNonDemarreePgTests(sp.PgSchemaTestCase):
+    """analysis_cancel_unstarted : annule seulement une analyse 'file', sans run_id."""
+
+    def setUp(self):
+        self.vider_tables()
+        self.conn = store_pg.connect(self.url)
+        self.addCleanup(self.conn.close)
+
+    def test_file_sans_run_id_annulee(self):
+        aid = store_pg.analysis_queue(self.conn, ["60"], False)
+        self.assertTrue(store_pg.analysis_cancel_unstarted(self.conn, aid))
+        row = store_pg.analysis_get(self.conn, aid)
+        self.assertEqual(row["statut"], "annulee")
+        self.assertIsNotNone(row["fin"])
+
+    def test_file_avec_run_id_refusee(self):
+        aid = store_pg.analysis_queue(self.conn, ["60"], False)
+        self.conn.execute("UPDATE analyses SET run_id = %s WHERE id = %s", ("run-1", aid))
+        self.conn.commit()
+        self.assertFalse(store_pg.analysis_cancel_unstarted(self.conn, aid))
+        row = store_pg.analysis_get(self.conn, aid)
+        self.assertEqual((row["statut"], row["run_id"]), ("file", "run-1"))
+
+    def test_en_cours_refusee(self):
+        aid = store_pg.analysis_start(self.conn, ["60"], False, "run-2")
+        self.assertFalse(store_pg.analysis_cancel_unstarted(self.conn, aid))
+        self.assertEqual(store_pg.analysis_get(self.conn, aid)["statut"], "en_cours")
+
+    def test_statut_final_refuse(self):
+        aid = store_pg.analysis_queue(self.conn, ["60"], False)
+        store_pg.analysis_end(self.conn, aid, "echec")
+        self.assertFalse(store_pg.analysis_cancel_unstarted(self.conn, aid))
+        self.assertEqual(store_pg.analysis_get(self.conn, aid)["statut"], "echec")
+
+
+@unittest.skipIf(bool(sp.RAISON_PG), sp.RAISON_PG)
+class ExistenceCsvGlobalPgTests(sp.PgSchemaTestCase):
+    def setUp(self):
+        self.vider_tables()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        sp.construire_racine(self.root)
+
+    def test_absent_avant_publication(self):
+        self.assertFalse(store_pg.PostgresSource(self.url).has_csv_all())
+
+    def test_present_apres_publication(self):
+        conn = store_pg.connect(self.url)
+        try:
+            store_pg.publish(FileSource(self.root), conn)
+        finally:
+            conn.close()
+        self.assertTrue(store_pg.PostgresSource(self.url).has_csv_all())
+
+
+@unittest.skipIf(psycopg is None, "psycopg non installé : test de délai ignoré")
+class DelaiConnexionTests(unittest.TestCase):
+    """connect_timeout=5 transmis à chaque connexion ; psycopg.connect est remplacé, aucune base n'est contactée."""
+
+    URL = "postgresql://utilisateur-test@hote-test/base-test"
+
+    def test_constante_de_delai(self):
+        self.assertEqual(store_pg.CONNECT_TIMEOUT_S, 5)
+
+    def test_store_connect_transmet_connect_timeout(self):
+        with mock.patch("psycopg.connect") as connecter:
+            store_pg.connect(self.URL)
+        self.assertEqual(connecter.call_args.args, (self.URL,))
+        self.assertEqual(connecter.call_args.kwargs.get("connect_timeout"), 5)
+
+    def test_postgres_source_transmet_connect_timeout(self):
+        source = store_pg.PostgresSource(self.URL)
+        with mock.patch("psycopg.connect") as connecter:
+            source.depts()                                    # résultat vide avec le faux curseur
+        self.assertEqual(connecter.call_args.kwargs.get("connect_timeout"), 5)
+
+
+class ExistenceCsvGlobalTests(unittest.TestCase):
+    """has_csv_all : existence seulement, sans charger le contenu du CSV global."""
+
+    URL = "postgresql://utilisateur-test@hote-test/base-test"
+
+    def test_filesource_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            racine = Path(tmp)
+            (racine / "resultats").mkdir()
+            (racine / "resultats" / CSV_TOUS).write_bytes(b"code_insee;url_page\r\n")
+            self.assertTrue(FileSource(racine).has_csv_all())
+
+    def test_filesource_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(FileSource(Path(tmp)).has_csv_all())
+
+    def _has_csv_all_avec_faux_curseur(self, valeur_fetchone):
+        with mock.patch("psycopg.connect") as connecter:
+            conn = connecter.return_value.__enter__.return_value
+            conn.execute.return_value.fetchone.return_value = valeur_fetchone
+            resultat = store_pg.PostgresSource(self.URL).has_csv_all()
+        return resultat, conn
+
+    @unittest.skipIf(psycopg is None, "psycopg non installé : test ignoré")
+    def test_postgres_present_sans_lire_le_contenu(self):
+        resultat, conn = self._has_csv_all_avec_faux_curseur((True,))
+        self.assertIs(resultat, True)
+        self.assertEqual(conn.execute.call_count, 1)          # une seule requête, sans transfert du BYTEA
+        sql = conn.execute.call_args.args[0]
+        self.assertIn("EXISTS", sql)
+        self.assertNotIn("contenu", sql)
+
+    @unittest.skipIf(psycopg is None, "psycopg non installé : test ignoré")
+    def test_postgres_absent(self):
+        resultat, conn = self._has_csv_all_avec_faux_curseur((False,))
+        self.assertIs(resultat, False)
+        self.assertEqual(conn.execute.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

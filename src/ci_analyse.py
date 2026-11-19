@@ -269,7 +269,11 @@ def cmd_fin(args) -> int:
     url = _database_url()
     if url is None:
         return 2
-    conn = store_pg.connect(url)
+    try:
+        conn = store_pg.connect(url)
+    except Exception as exc:  # noqa: BLE001 - le message de psycopg peut contenir l'hôte : seul le type est écrit
+        print(f"Analyse {args.analysis_id} : base inaccessible ({type(exc).__name__}).", file=sys.stderr, flush=True)
+        return 1
     try:
         if store_pg.analysis_end(conn, args.analysis_id, args.statut):
             print(f"Analyse {args.analysis_id} : statut « {args.statut} ».", flush=True)

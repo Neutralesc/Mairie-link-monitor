@@ -137,16 +137,21 @@ class ApiBaseEnPanneTests(ServeurApi):
             status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
         self.assertIn("Lancer une analyse", corps)
-        self.assertIn("Aucun département analysé", corps)
+        self.assertIn("Base de données indisponible", corps)    # alerte à la place de la liste des départements
+        self.assertNotIn("Aucun département analysé", corps)
         texte = "\n".join(logs.output)
         self.assertIn("base de données indisponible", texte)
         self.assertNotIn(URL_PANNE, texte)                      # l'URL n'est jamais journalisée
 
-    def test_rapport_et_csv_inconnus_404_sans_erreur(self):
+    def test_rapport_et_csv_tous_503_base_en_panne(self):
         with self.assertLogs("api", level="WARNING"):
-            self.assertEqual(self.appel("/rapport/60", auth=MOT_DE_PASSE)[0], 404)
+            status, _, corps = self.appel("/rapport/60", auth=MOT_DE_PASSE)
+        self.assertEqual(status, 503)
+        self.assertIn("Service indisponible", corps)
         with self.assertLogs("api", level="WARNING"):
-            self.assertEqual(self.appel("/csv/tous", auth=MOT_DE_PASSE)[0], 404)
+            status, _, corps = self.appel("/csv/tous", auth=MOT_DE_PASSE)
+        self.assertEqual(status, 503)
+        self.assertIn("Service indisponible", corps)
 
     def test_ressource_dsfr_sans_authentification(self):
         status, en_tetes, corps = self.appel("/static/dsfr/dsfr/dsfr.min.css")
@@ -212,6 +217,42 @@ class ApiPostgresTests(ServeurApi, sp.PgSchemaTestCase):
                 texte = corps + "\n".join(f"{k}: {v}" for k, v in en_tetes.items())
                 for secret in (MOT_DE_PASSE, JETON, "pgtest@localhost"):
                     self.assertNotIn(secret, texte)
+
+
+class ApiBaseEnPanneLotBTests(ServeurApi):
+    """Base injoignable (correctif lot B) : pages de données en 503, accueil avec alerte, source fichiers sans panne."""
+
+    def setUp(self):
+        self.demarrer(configuration())
+
+    def test_csv_60_503_base_en_panne(self):
+        with self.assertLogs("api", level="WARNING") as logs:
+            status, _, corps = self.appel("/csv/60", auth=MOT_DE_PASSE)
+        self.assertEqual(status, 503)
+        self.assertIn("Service indisponible", corps)
+        self.assertNotIn(URL_PANNE, "\n".join(logs.output))
+
+    def test_accueil_affiche_alerte_avertissement_et_pas_d_erreur(self):
+        with self.assertLogs("api", level="WARNING"):
+            status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
+        self.assertEqual(status, 200)
+        self.assertIn("fr-alert--warning", corps)
+        self.assertNotIn("fr-alert--error", corps)
+
+    def test_source_fichiers_ne_leve_jamais_source_indisponible(self):
+        # Les appels ne doivent lever aucune exception (SourceIndisponible ou autre), racine vide puis remplie.
+        with tempfile.TemporaryDirectory() as tmp:
+            racine = Path(tmp)
+            source = FileSource(racine)
+            self.assertEqual(source.depts(), [])
+            self.assertIsNone(source.get("60"))
+            self.assertIsNone(source.csv_all())
+            self.assertFalse(source.has_csv_all())
+            sp.construire_racine(racine)
+            source = FileSource(racine)
+            self.assertEqual(source.depts(), ["02", "60", "80"])
+            self.assertIsNotNone(source.get("60"))
+            self.assertTrue(source.has_csv_all())
 
 
 if __name__ == "__main__":

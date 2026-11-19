@@ -21,7 +21,8 @@ API = "https://api.github.com"
 MSG_DEJA = "Une analyse est déjà en cours : attendez la fin ou arrêtez-la."
 MSG_DB = "Base de données indisponible : réessayez plus tard."
 MSG_RESEAU = "Impossible de joindre GitHub : réessayez plus tard."
-PEREMPTION_S = 7 * 3600
+PEREMPTION_S = 7 * 3600          # analyse en cours (en_cours) : runner présumé mort au-delà
+PEREMPTION_FILE_S = 30 * 60      # analyse en file jamais démarrée : abandonnée au-delà
 CACHE_S = 2.0
 ACTIFS = ("file", "en_cours")
 
@@ -95,7 +96,8 @@ class ActionsRunner:
     @staticmethod
     def _perimee(row: dict) -> bool:
         debut = row.get("debut")
-        return debut is not None and time.time() - debut.timestamp() > PEREMPTION_S
+        seuil = PEREMPTION_FILE_S if row.get("statut") == "file" else PEREMPTION_S
+        return debut is not None and time.time() - debut.timestamp() > seuil
 
     def _terminer(self, analysis_id: int, statut: str) -> None:
         conn = self._store.connect(self._url)
@@ -219,15 +221,33 @@ class ActionsRunner:
             return MSG_RESEAU
         return f"Impossible de lancer l'analyse (GitHub : HTTP {status})."
 
+    def _annuler_non_demarree(self, analysis_id: int) -> bool:
+        """Annule une analyse 'file' sans run_id ; False si le CI vient de s'y attacher (ou si elle a changé)."""
+        conn = self._store.connect(self._url)
+        try:
+            annulee = self._store.analysis_cancel_unstarted(conn, analysis_id)
+        finally:
+            conn.close()
+        self._invalider()
+        return annulee
+
     def stop(self) -> None:
         try:
             row = self._lire(frais=True)
             if not self._active(row):
                 return
+            analysis_id = row["id"]
+            if not row.get("run_id") and row.get("statut") == "file":
+                # Pas encore démarrée côté GitHub : annulation conditionnelle (course avec l'attachement du CI).
+                if self._annuler_non_demarree(analysis_id):
+                    return
+                row = self._lire(frais=True)
+                if not self._active(row) or row["id"] != analysis_id:
+                    return
             run_id = str(row.get("run_id") or "")
             if not run_id:
-                # Pas encore démarrée côté GitHub : rien à annuler là-bas.
-                self._terminer(row["id"], "annulee")
+                # En cours sans run_id : rien à annuler côté GitHub.
+                self._terminer(analysis_id, "annulee")
                 return
             status, _ = self._api("POST", f"/repos/{self._repo}/actions/runs/{quote(run_id, safe='')}/cancel")
             if status != 202:

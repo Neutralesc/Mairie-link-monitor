@@ -1,5 +1,6 @@
 """Application web : pages, lancement et arrêt d'une analyse, mot de passe, protection des formulaires."""
 import base64
+import gzip
 import sys
 import tempfile
 import threading
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402,F401
 import csvio  # noqa: E402
 import history  # noqa: E402
+import report  # noqa: E402
 import webapp  # noqa: E402
 from layout import DeptPaths  # noqa: E402
 
@@ -146,6 +148,128 @@ class ServeTests(unittest.TestCase):
         self.assertEqual(webapp.parse_depts("60, 1 2a"), ["60", "01", "2A"])
         self.assertEqual(webapp.parse_depts("Tous"), ["all"])
         self.assertIsNone(webapp.parse_depts("60 ../x"))
+
+
+# ----------------------------------------------------------------- correctifs de fiabilité (lot B)
+
+GROS_CSV = ("code_insee;url_page\r\n"
+            + "".join(f"{i:05d};https://site-{i}.fr/page-{i}\r\n" for i in range(3000))).encode("utf-8")
+PETIT_CSV = "code_insee;url_page\r\n60001;https://a.fr/é\r\n".encode("utf-8")
+
+
+class BrutWebTests(WebTests):
+    """Requêtes qui renvoient les octets bruts et les en-têtes (WebTests.call décode le texte)."""
+
+    def brut(self, path, en_tetes=None, data=None):
+        req = urllib.request.Request(self.base + path, data=data)
+        for nom, valeur in (en_tetes or {}).items():
+            req.add_header(nom, valeur)
+        try:
+            with self.opener.open(req, timeout=5) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def verifier_en_tetes_securite(self, en_tetes):
+        self.assertEqual(en_tetes.get("X-Frame-Options"), "DENY")
+        self.assertEqual(en_tetes.get("Referrer-Policy"), "same-origin")
+        politique = en_tetes.get("Content-Security-Policy", "")
+        self.assertIn("frame-ancestors 'none'", politique)
+        self.assertIn("default-src 'self'", politique)
+
+
+class CsvTousCompressionTests(BrutWebTests):
+    def ecrire_csv_global(self, octets: bytes) -> None:
+        (self.root / "resultats").mkdir(exist_ok=True)
+        (self.root / "resultats" / "liens_tous_departements.csv").write_bytes(octets)
+
+    def test_gros_csv_compresse_si_gzip_accepte(self):
+        self.assertGreater(len(GROS_CSV), 64 * 1024)
+        self.ecrire_csv_global(GROS_CSV)
+        status, en_tetes, corps = self.brut("/csv/tous", {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertEqual(en_tetes.get("Content-Encoding"), "gzip")
+        self.assertEqual(en_tetes.get("Vary"), "Accept-Encoding")
+        self.assertEqual(gzip.decompress(corps), GROS_CSV)      # octets identiques à la source
+        self.assertLess(len(corps), len(GROS_CSV))
+
+    def test_gros_csv_compresse_si_x_gzip_accepte(self):
+        self.ecrire_csv_global(GROS_CSV)
+        status, en_tetes, corps = self.brut("/csv/tous", {"Accept-Encoding": "x-gzip"})
+        self.assertEqual(en_tetes.get("Content-Encoding"), "gzip")
+        self.assertEqual(gzip.decompress(corps), GROS_CSV)
+
+    def test_gros_csv_sans_en_tete_octets_identiques(self):
+        self.ecrire_csv_global(GROS_CSV)
+        status, en_tetes, corps = self.brut("/csv/tous")
+        self.assertEqual(status, 200)
+        self.assertIsNone(en_tetes.get("Content-Encoding"))
+        self.assertEqual(corps, GROS_CSV)
+
+    def test_gros_csv_gzip_q0_refuse(self):
+        self.ecrire_csv_global(GROS_CSV)
+        status, en_tetes, corps = self.brut("/csv/tous", {"Accept-Encoding": "gzip;q=0"})
+        self.assertIsNone(en_tetes.get("Content-Encoding"))
+        self.assertEqual(corps, GROS_CSV)
+
+    def test_petit_csv_jamais_compresse(self):
+        self.ecrire_csv_global(PETIT_CSV)
+        status, en_tetes, corps = self.brut("/csv/tous", {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertIsNone(en_tetes.get("Content-Encoding"))
+        self.assertEqual(corps, PETIT_CSV)
+
+
+class LancerLongueurInvalideTests(BrutWebTests):
+    def poster(self, longueur: str):
+        # Corps vide : le serveur refuse avant toute lecture du corps, donc rien à désynchroniser.
+        return self.brut("/lancer", {"Origin": self.base, "Content-Length": longueur}, data=b"")
+
+    def test_content_length_non_numerique_400_sans_analyse(self):
+        self.assertEqual(self.poster("abc")[0], 400)
+        self.assertIsNone(self.runner.proc)
+
+    def test_content_length_negatif_400_sans_analyse(self):
+        self.assertEqual(self.poster("-5")[0], 400)
+        self.assertIsNone(self.runner.proc)
+
+    def test_content_length_trop_grand_400_sans_analyse(self):
+        self.assertEqual(self.poster("99999")[0], 400)
+        self.assertIsNone(self.runner.proc)
+
+
+class EnTetesSecuriteTests(BrutWebTests):
+    def test_accueil_en_tetes_de_securite(self):
+        status, en_tetes, _ = self.brut("/")
+        self.assertEqual(status, 200)
+        self.verifier_en_tetes_securite(en_tetes)
+
+
+class EnTetesSecuriteProtegesTests(BrutWebTests):
+    password = "secret-entetes-7f"
+
+    def test_401_en_tetes_de_securite(self):
+        status, en_tetes, _ = self.brut("/")
+        self.assertEqual(status, 401)
+        self.verifier_en_tetes_securite(en_tetes)
+
+
+class ReportLinkTests(unittest.TestCase):
+    def test_schema_javascript_sans_lien_et_texte_echappe(self):
+        piege = 'javascript:alert("1")<img src=x onerror=alert(2)>'
+        html = report.link(piege)
+        self.assertNotIn("<a", html)
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img", html)
+        self.assertIn("javascript:alert(&quot;1&quot;)", html)
+
+    def test_https_avec_lien(self):
+        html = report.link("https://x.fr/a")
+        self.assertIn('<a href="https://x.fr/a"', html)
+        self.assertIn('rel="noopener noreferrer"', html)
+
+    def test_schema_http_majuscules_avec_lien(self):
+        self.assertIn('<a href="HTTP://x.fr"', report.link("HTTP://x.fr"))
 
 
 if __name__ == "__main__":

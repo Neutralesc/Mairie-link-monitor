@@ -324,5 +324,78 @@ class ValidationTests(unittest.TestCase):
             self.build(repo=None)
 
 
+# ----------------------------------------------------------------- correctifs de fiabilité (lot B)
+
+class _StoreAnnulable(FauxStore):
+    """Ajoute analysis_cancel_unstarted : annule une analyse 'file' sans run_id, comme store_pg."""
+
+    def analysis_cancel_unstarted(self, conn, aid):
+        self._verifier()
+        r = self.lignes.get(aid)
+        if r is None or r["statut"] != "file" or r["run_id"]:
+            return False
+        r["statut"], r["fin"] = "annulee", datetime.now(timezone.utc)
+        return True
+
+
+class _StoreCourse(FauxStore):
+    """Course simulée : le CI s'attache (run_id 555) juste avant l'annulation conditionnelle, qui échoue."""
+
+    def analysis_cancel_unstarted(self, conn, aid):
+        self._verifier()
+        self.lignes[aid]["run_id"] = "555"
+        return False
+
+
+class _StoreTerminee(FauxStore):
+    """Course simulée : l'analyse atteint un statut final juste avant l'annulation conditionnelle, qui échoue."""
+
+    def analysis_cancel_unstarted(self, conn, aid):
+        self._verifier()
+        self.lignes[aid]["statut"] = "terminee"
+        return False
+
+
+class StopCourseTests(ActionsRunnerTests):
+    def test_stop_file_sans_run_id_annulee_sans_appel_github(self):
+        self.store = _StoreAnnulable()
+        aid = self.store.ajouter("file", run_id="")
+        self.runner().stop()
+        self.assertEqual(self.store.statut(aid), "annulee")
+        self.assertEqual(self.http.appels, [])
+
+    def test_stop_course_le_ci_s_attache_puis_run_annule(self):
+        self.store = _StoreCourse()
+        aid = self.store.ajouter("file", run_id="")
+        self.http.reponse = (202, b"")
+        self.runner().stop()
+        self.assertEqual(len(self.http.appels), 1)
+        appel = self.http.appels[0]
+        self.assertEqual((appel["method"], appel["url"]),
+                         ("POST", "https://api.github.com/repos/proprio/depot/actions/runs/555/cancel"))
+        self.assertEqual(self.store.statut(aid), "file")        # le statut final viendra du runner
+
+    def test_stop_course_analyse_finale_entre_temps_rien_a_faire(self):
+        self.store = _StoreTerminee()
+        aid = self.store.ajouter("file", run_id="")
+        self.runner().stop()
+        self.assertEqual(self.store.statut(aid), "terminee")
+        self.assertEqual(self.http.appels, [])
+
+
+class PeremptionFileTests(ActionsRunnerTests):
+    """Analyse 'file' : périmée au-delà de 30 minutes (les 6 h et 7 h de 'en_cours' sont dans PeremptionTests)."""
+
+    def test_file_de_31_minutes_perimee_et_close_en_echec(self):
+        aid = self.store.ajouter("file", debut=datetime.now(timezone.utc) - timedelta(minutes=31))
+        self.assertFalse(self.runner().running())
+        self.assertEqual(self.store.statut(aid), "echec")
+
+    def test_file_de_29_minutes_toujours_active(self):
+        aid = self.store.ajouter("file", debut=datetime.now(timezone.utc) - timedelta(minutes=29))
+        self.assertTrue(self.runner().running())
+        self.assertEqual(self.store.statut(aid), "file")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS analyses_une_active ON analyses ((TRUE)) WHERE
 """
 
 JOURNAL_MAX = 4000
+CONNECT_TIMEOUT_S = 5  # délai de connexion : une base injoignable ne bloque pas une requête web ou le runner
 
 _UPSERT_DEPT = """
 INSERT INTO publications (dept, controle_date, communes, avec_lien, report_html, csv_bytes, csv_present,
@@ -80,7 +81,7 @@ def _psycopg():
 
 def connect(url: str) -> psycopg.Connection:
     psycopg = _psycopg()
-    return psycopg.connect(url, autocommit=False)
+    return psycopg.connect(url, autocommit=False, connect_timeout=CONNECT_TIMEOUT_S)
 
 
 def ensure_schema(conn) -> None:
@@ -146,7 +147,7 @@ class PostgresSource:
         _psycopg()  # erreur claire dès la construction si psycopg manque
 
     def _connect(self):
-        return _psycopg().connect(self.url)
+        return _psycopg().connect(self.url, connect_timeout=CONNECT_TIMEOUT_S)
 
     @staticmethod
     def _publication(row) -> Publication:
@@ -193,6 +194,12 @@ class PostgresSource:
             row = conn.execute("SELECT contenu FROM publication_globale WHERE nom = %s", (CSV_TOUS,)).fetchone()
         return None if row is None else bytes(row[0])
 
+    def has_csv_all(self) -> bool:
+        """Existence du CSV global sans transférer son contenu (BYTEA non lu)."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT EXISTS(SELECT 1 FROM publication_globale WHERE nom = %s)", (CSV_TOUS,)).fetchone()
+        return bool(row[0])
+
 
 # ----------------------------------------------------------------- suivi des analyses
 
@@ -228,6 +235,20 @@ def analysis_attach_run(conn, analysis_id: int, run_id: str) -> bool:
     ).fetchone()
     conn.commit()
     return row is not None
+
+
+def analysis_cancel_unstarted(conn, analysis_id: int) -> bool:
+    """Annule une analyse jamais démarrée côté GitHub (statut 'file', sans run_id). True si une ligne a changé.
+
+    Si le CI s'est attaché entre-temps (run_id renseigné), la condition ne correspond plus : False, et l'appelant
+    doit relire l'analyse pour annuler le run GitHub.
+    """
+    cur = conn.execute(
+        "UPDATE analyses SET statut = 'annulee', fin = now() WHERE id = %s AND statut = 'file' AND run_id = ''",
+        (analysis_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def analysis_log(conn, analysis_id: int, text: str) -> None:

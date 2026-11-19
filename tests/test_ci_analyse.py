@@ -3,6 +3,8 @@
 Les classes PostgreSQL sont ignorées sans MLM_TEST_DATABASE_URL ; la classe CiSansBase tourne toujours (aucun accès
 à la base dans ces cas).
 """
+import contextlib
+import io
 import os
 import signal
 import subprocess
@@ -11,11 +13,18 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support_publications as sp  # noqa: E402
 
+import ci_analyse  # noqa: E402
 import store_pg  # noqa: E402
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 CI = str(sp.RACINE / "src" / "ci_analyse.py")
 URL_INEXISTANTE = "postgresql://inexistant.invalid/x"  # ne doit jamais être contactée par les cas testés
@@ -226,6 +235,159 @@ class CiPgTests(sp.PgSchemaTestCase):
         self.assertIn("déjà finale", r.stdout)
         row = self.lire(aid)
         self.assertEqual((row["statut"], row["fin"]), ("terminee", fin))
+
+
+# ----------------------------------------------------------------- correctifs de fiabilité (lot A)
+
+URL_SECRETE = "postgresql://secretuser@hote-inconnu.invalid:1/db"  # ni l'utilisateur ni l'hôte ne doivent sortir
+WORKFLOW = sp.RACINE / ".github" / "workflows" / "analyse.yml"
+
+
+class CiEchecConnexionTests(unittest.TestCase):
+    """Sans Postgres : une connexion en échec n'affiche que le type de l'erreur (aucun hôte, aucun utilisateur)."""
+
+    def test_run_connexion_en_echec_sans_hote_ni_utilisateur_affiches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = lancer_ci(["run", "--analysis-id", "1", "--depts", "60", "--root", tmp], DATABASE_URL=URL_SECRETE)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Connexion à la base impossible", r.stderr)
+        sorties = r.stdout + r.stderr
+        for secret in ("secretuser", "hote-inconnu"):
+            self.assertNotIn(secret, sorties)
+
+
+@unittest.skipIf(bool(sp.RAISON_PG), sp.RAISON_PG)
+class CiLotAPgTests(sp.PgSchemaTestCase):
+    def setUp(self):
+        self.vider_tables()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        sp.construire_racine(self.root)                        # 02, 60 et 80 + CSV global
+        (self.root / "src").mkdir()
+        (self.root / "src" / "mairie_link_monitor.py").write_text(sp.FAUX_CRAWLER, encoding="utf-8")
+        self.addCleanup(ci_analyse._SIGNAL.__setitem__, "recu", 0)   # état global du module : remis à zéro
+
+    def creer(self, statut_final: str | None, depts: list[str]) -> int:
+        conn = store_pg.connect(self.url)
+        try:
+            aid = store_pg.analysis_queue(conn, depts, False)
+            if statut_final is not None:
+                store_pg.analysis_end(conn, aid, statut_final)
+            return aid
+        finally:
+            conn.close()
+
+    def lire(self, aid: int) -> dict:
+        conn = store_pg.connect(self.url)
+        try:
+            return store_pg.analysis_get(conn, aid)
+        finally:
+            conn.close()
+
+    def publication(self):
+        pg = store_pg.PostgresSource(self.url)
+        return pg.depts(), pg.csv_all()
+
+    def lancer_analyse(self, aid: int, depts: str = "60", mode: str = "ok"):
+        args = ["run", "--analysis-id", str(aid), "--depts", depts, "--root", str(self.root)]
+        return lancer_ci(args, DATABASE_URL=self.url, FAUX_MODE=mode)
+
+    def test_run_depts_60_ne_publie_que_60(self):
+        aid = self.creer(None, ["60"])
+        r = self.lancer_analyse(aid, depts="60")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("publié : 60 ; CSV global : oui", r.stdout)
+        depts, csv = self.publication()
+        self.assertEqual(depts, ["60"])                        # 80 et 02 présents dans la racine, non publiés
+        self.assertEqual(csv, (self.root / "resultats" / "liens_tous_departements.csv").read_bytes())  # CSV du crawler
+        self.assertEqual(self.lire(aid)["statut"], "terminee")
+
+    def test_relance_analyse_en_echec_code_3_sans_lancement(self):
+        aid = self.creer("echec", ["60"])
+        r = self.lancer_analyse(aid)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("Analyse déjà terminée ou annulée : rien à lancer.", r.stdout)
+        self.assertFalse((self.root / "demarre.txt").exists())
+        self.assertEqual(self.lire(aid)["statut"], "echec")
+
+    def test_relance_analyse_terminee_code_0_sans_lancement(self):
+        aid = self.creer("terminee", ["60"])
+        r = self.lancer_analyse(aid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Analyse déjà terminée ou annulée : rien à lancer.", r.stdout)
+        self.assertFalse((self.root / "demarre.txt").exists())
+
+    def test_relance_analyse_annulee_message_exact(self):
+        aid = self.creer("annulee", ["60"])
+        r = self.lancer_analyse(aid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Analyse déjà terminée ou annulée : rien à lancer.", r.stdout)
+
+    def test_annulee_avant_demarrage_rien_publie(self):
+        # Signal reçu avant le lancement du crawler : aucun crawler, aucune publication, statut annulee.
+        aid = self.creer(None, ["60"])
+        ci_analyse._SIGNAL["recu"] = signal.SIGTERM
+        sortie = io.StringIO()
+        with contextlib.redirect_stdout(sortie):
+            code = ci_analyse._executer(self.url, self.root, aid, ["60"], False, "", "")
+        self.assertEqual(code, ci_analyse.CODE_ANNULEE)
+        row = self.lire(aid)
+        self.assertEqual(row["statut"], "annulee")
+        self.assertIn("crawler non lancé (annulation avant démarrage) : aucune publication", row["journal"])
+        self.assertFalse((self.root / "demarre.txt").exists())
+        self.assertEqual(self.publication(), ([], None))
+
+    def test_journal_et_sorties_sans_secret_quand_une_ecriture_echoue(self):
+        import psycopg  # présent : la classe est ignorée sans base
+
+        aid = self.creer(None, ["60"])
+        connexion_reelle = store_pg.connect
+        appels = []
+
+        def connexion(url):
+            appels.append(url)
+            if len(appels) == 2:  # 1 : rattachement ; 2 : premier vidage du journal, après le crawler
+                raise psycopg.OperationalError("échec vers secretuser@hote-inconnu.invalid:1")
+            return connexion_reelle(url)
+
+        sortie, erreurs = io.StringIO(), io.StringIO()
+        with mock.patch.object(store_pg, "connect", side_effect=connexion), \
+                contextlib.redirect_stdout(sortie), contextlib.redirect_stderr(erreurs):
+            code = ci_analyse._executer(self.url, self.root, aid, ["60"], False, "run-secret", "")
+        self.assertEqual(code, 0)
+        self.assertIn("journal non écrit", erreurs.getvalue())
+        self.assertIn("OperationalError", erreurs.getvalue())   # seul le type est affiché
+        journal = self.lire(aid)["journal"]
+        self.assertIn("faux crawler", journal)                  # le journal retenu est écrit plus tard
+        for secret in ("secretuser", "hote-inconnu"):
+            for texte, nom in ((sortie.getvalue(), "sortie"), (erreurs.getvalue(), "erreur"), (journal, "journal")):
+                with self.subTest(secret=secret, flux=nom):
+                    self.assertNotIn(secret, texte)
+
+
+class WorkflowAnalyseTests(unittest.TestCase):
+    """Le workflow GitHub Actions ne contient aucune interpolation dans les blocs run (lecture YAML, sans réseau)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if yaml is None:
+            raise unittest.SkipTest("PyYAML non installé : test du workflow ignoré")
+        cls.etapes = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["analyse"]["steps"]
+
+    def test_aucune_ligne_run_ne_contient_d_expression(self):
+        runs = [e for e in self.etapes if "run" in e]
+        self.assertTrue(runs)
+        for etape in runs:
+            for ligne in str(etape["run"]).splitlines():
+                with self.subTest(etape=etape.get("name"), ligne=ligne):
+                    self.assertNotIn("${{", ligne)
+
+    def test_etape_finale_always_avec_job_status_par_env(self):
+        finale = self.etapes[-1]
+        self.assertEqual(finale.get("if"), "always()")
+        self.assertEqual(finale.get("env", {}).get("JOB_STATUS"), "${{ job.status }}")
+        self.assertIn("$JOB_STATUS", finale["run"])            # lu depuis l'environnement, pas interpolé
 
 
 if __name__ == "__main__":

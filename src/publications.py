@@ -19,6 +19,10 @@ DEPT_RE = re.compile(r"^(\d{2,3}|2[AB])$")
 CSV_TOUS = "liens_tous_departements.csv"
 
 
+class SourceIndisponible(Exception):
+    """La lecture des publications est impossible (base en panne) : l'interface répond 503, sans détail technique."""
+
+
 @dataclass(frozen=True)
 class Publication:
     dept: str                 # '60', '2A'…
@@ -36,6 +40,7 @@ class PublicationSource(Protocol):
     # None si département inconnu ; report=False / csv=False évitent de produire les champs lourds (alors vides)
     def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None: ...
     def csv_all(self) -> bytes | None: ...               # liens_tous_departements.csv, None s'il n'existe pas
+    def has_csv_all(self) -> bool: ...                   # existence du CSV global, sans en lire le contenu
 
 
 class FileSource:
@@ -73,3 +78,6 @@ class FileSource:
     def csv_all(self) -> bytes | None:
         f = self.root / "resultats" / CSV_TOUS
         return f.read_bytes() if f.exists() else None
+
+    def has_csv_all(self) -> bool:
+        return (self.root / "resultats" / CSV_TOUS).exists()

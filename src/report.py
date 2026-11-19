@@ -5,6 +5,7 @@ Pages en charte DSFR 1.15.4 (ressources locales dans public/static/dsfr, aucun C
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -77,9 +78,17 @@ def page(title: str, body: str, refresh: int | None = None, static_prefix: str =
     )
 
 
+SCHEMAS_LIENS_RE = re.compile(r"https?://", re.IGNORECASE)
+
+
 def link(url: str) -> str:
+    """Lien vers une page web : seulement http(s) ; tout autre schéma (javascript:, data:…) est affiché sans lien."""
+    if not url:
+        return ""
+    if not SCHEMAS_LIENS_RE.match(url):
+        return escape(url)
     return (f'<a href="{escape(url)}" rel="noopener noreferrer" target="_blank">{escape(url)}'
-            '<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>') if url else ""
+            '<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>')
 
 
 def source(url: str) -> str:
