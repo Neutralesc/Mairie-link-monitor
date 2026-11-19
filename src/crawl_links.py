@@ -34,6 +34,7 @@ import time
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
@@ -82,6 +83,7 @@ TARGET_RE = re.compile(r"(?<![\w.-])(?:https?:)?(?://)?" + re.escape(TARGET_HOST
 TRACKING_PARAMS = {"fbclid", "gclid", "mc_cid", "mc_eid", "replytocom", "share", "print", "amp", "output"}
 PAGER_PARAMS = {"page", "paged", "pg", "pagenum", "start", "offset", "debut", "date", "annee", "year", "mois", "month",
                 "jour", "day", "cal", "calendar", "calendrier", "month_offset", "periode", "semaine", "week"}
+PAGER_VALUE_RE = re.compile(r"^\d{1,6}(?:[-/.]\d{1,2}){0,2}$")   # valeur de pagination : numéro ou date (vide = oui aussi)
 PAGER_PATH_RE = re.compile(r"/(?:page|pages|p)/\d+/?$|/(?:19|20)\d\d/(?:0?[1-9]|1[0-2])(?:/\d{1,2})?/?$")
 TRAP_CAP = 8        # au plus 8 pages par gabarit « pagination / calendrier » : au-delà ce sont des variantes sans intérêt
 FALLBACK_PATHS = ("/plan-du-site", "/mentions-legales", "/contact", "/accessibilite", "/actualites", "/sitemap")
@@ -134,8 +136,13 @@ def trap_key(url: str) -> str:
     """Gabarit d'une URL de pagination ou de calendrier ('' sinon). Exemple : /agenda?date=2026-03 -> '/agenda?date'.
     Sert à ne lire que TRAP_CAP variantes d'un même gabarit, sans toucher aux pages de contenu."""
     p = urlsplit(url)
-    names = sorted({kv.split("=", 1)[0].lower() for kv in p.query.split("&") if kv})
-    if any(n in PAGER_PARAMS for n in names):
+    pairs = [kv for kv in p.query.split("&") if kv]
+    names = sorted({kv.split("=", 1)[0].lower() for kv in pairs})
+    # Un paramètre de PAGER_PARAMS ne compte que si sa valeur ressemble à un numéro ou une date (?page=contact : contenu)
+    pager = {kv.split("=", 1)[0].lower() for kv in pairs
+             if kv.split("=", 1)[0].lower() in PAGER_PARAMS
+             and (not kv.partition("=")[2] or PAGER_VALUE_RE.match(kv.partition("=")[2]))}
+    if pager:
         return f"{p.path}?{'&'.join(names)}"
     if PAGER_PATH_RE.search(p.path):
         return re.sub(r"\d+", "#", p.path)
@@ -370,7 +377,7 @@ def shard_of(url: str, workers: int) -> int:
 
 
 def sitemap_locs(xml: str) -> list[str]:
-    return [m.strip() for m in re.findall(r"<loc>\s*([^<]+?)\s*</loc>", xml)][:SITEMAP_MAX_LOC]
+    return [unescape(m.strip()) for m in re.findall(r"<loc>\s*([^<]+?)\s*</loc>", xml)][:SITEMAP_MAX_LOC]
 
 
 # ----------------------------------------------------------------- réseau
@@ -570,16 +577,16 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
         # niveau -1 = page où le lien avait déjà été vu lors d'un précédent passage.
         heap: list[tuple[int, int, str, int]] = []
         tick = itertools.count()
-        seen: set[str] = set()
+        seen: set[tuple[str, str, str]] = set()        # identité de page (page_id) : /fr et /fr/ ne sont lues qu'une fois
 
         templates: dict[str, int] = {}
         probes: set[str] = set()                       # pages devinées : un échec n'est pas une erreur du site
         weak_done, sitemap_tried, accessible, mention = False, False, 0, ""
 
         def push(url: str, depth: int, known: bool = False) -> None:
-            if url in seen:
+            if page_id(url) in seen:
                 return
-            seen.add(url)
+            seen.add(page_id(url))
             key = "" if known else trap_key(url)
             if key:
                 templates[key] = templates.get(key, 0) + 1
@@ -591,13 +598,15 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
         push(normalize_internal(start), 0)
         alternates = alternate_starts(start)
         for kp in (site.get("known_pages") or [])[:MAX_KNOWN_PAGES]:
-            if crawlable(kp, site_host):
+            if crawlable(kp, site_host) and page_id(normalize_internal(kp)) not in seen:
+                probes.add(normalize_internal(kp))     # page connue disparue (404) : pas une erreur du site
                 push(normalize_internal(kp), 1, known=True)
 
-        def next_alternate() -> bool:
+        def next_alternate(failed: str) -> bool:
+            seen.discard(page_id(failed))                  # l'accueil n'a pas été lu : ses variantes (www, http) restent à essayer
             while alternates:
                 alt = normalize_internal(alternates.pop(0))
-                if alt not in seen:
+                if page_id(alt) not in seen:
                     push(alt, 0)
                     return True
             return False
@@ -612,7 +621,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
             if rstate == "indisponible":
                 if depth == 0:
                     first_error = first_error or f"{url} -> robots {rkind} {rstatus or ''}".strip()
-                    if next_alternate():
+                    if next_alternate(url):
                         continue
                     if rstatus is not None:
                         row.update(statut_crawl="robots_indisponible", erreur=first_error[:200],
@@ -632,7 +641,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                     continue
                 row["pages_interdites_robots"] += 1
                 if depth == 0:
-                    if next_alternate():
+                    if next_alternate(url):
                         continue
                     row.update(statut_crawl="robots_interdit", motif="robots.txt interdit la page d'accueil")
                     return
@@ -665,7 +674,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                 if depth < opts["max_depth"]:
                     for nxt in data.internal:
                         push(nxt, depth + 1)
-                elif any(n not in seen for n in data.internal):
+                elif any(page_id(n) not in seen for n in data.internal):
                     row["limite_profondeur_atteinte"] = 1
                 if depth == 0 and not sitemap_done and opts["max_depth"] >= 1:
                     sitemap_done = sitemap_tried = True
@@ -704,10 +713,10 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                         push(new, 0)
                         continue
                     if res.kind == "erreur_ssl" and use_insecure():    # certificat invalide : nouvel essai sans vérification
-                        seen.discard(url)
+                        seen.discard(page_id(url))
                         push(url, 0)
                         continue
-                    if next_alternate():                               # repli : racine, www, http/https
+                    if next_alternate(url):                            # repli : racine, www, http/https
                         continue
                     errors += 1
                     row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {last_kind}",
