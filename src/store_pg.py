@@ -88,13 +88,19 @@ def ensure_schema(conn) -> None:
     conn.commit()
 
 
-def publish(source: PublicationSource, conn) -> dict[str, Any]:
+def publish(source: PublicationSource, conn, only: list[str] | None = None) -> dict[str, Any]:
     """Écrit chaque département de `source` (une transaction par département) puis le CSV global s'il existe.
+
+    `only` : si fourni et différent de ['all'], ne publie que ces départements (ceux de `source` qui y figurent).
+    Le CSV global est publié dans tous les cas s'il existe.
 
     Les départements déjà publiés et absents de la source ne sont pas supprimés.
     """
+    restreint = None if only is None or list(only) == ["all"] else set(only)
     published: list[str] = []
     for dept in source.depts():
+        if restreint is not None and dept not in restreint:
+            continue
         pub = source.get(dept)
         if pub is None:
             continue

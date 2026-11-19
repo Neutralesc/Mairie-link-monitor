@@ -104,3 +104,14 @@ l'onglet *Actions* de GitHub. Les journaux n'affichent jamais les valeurs des se
 - **Renouvellement** : le jeton GitHub expire à la date choisie à l'étape 3 ; renouvelez-le et mettez à jour
   `MLM_GH_TOKEN` dans Vercel, puis redéployez.
 - **Changer le mot de passe** : modifiez `MLM_PASSWORD` dans Vercel, puis redéployez.
+
+## Durcissement recommandé
+
+- **Environnement GitHub** (facultatif) : dans *Settings → Environments*, créez un environnement limité à la branche
+  `main`, puis placez-y le secret `DATABASE_URL`. Ajoutez ensuite `environment: <nom>` au job `analyse` si vous le
+  souhaitez : le secret ne sera alors accessible qu'aux exécutions sur `main`.
+- **Actions épinglées par SHA** : remplacez les références `@v4` des actions (`actions/checkout`, `actions/setup-python`,
+  `actions/cache`) par le SHA complet du commit voulu, pour qu'une mise à jour amont ne modifie pas le workflow à votre insu.
+- **Départements retirés** : un département retiré de l'inventaire reste visible dans l'interface tant qu'on ne le
+  supprime pas de la base. Les publications sont cumulatives, c'est un choix assumé : une analyse ne retire jamais
+  de résultat déjà publié.

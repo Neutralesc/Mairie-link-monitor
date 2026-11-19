@@ -77,9 +77,16 @@ jobs:
             resultats
           key: mlm-etat-${{ github.run_id }}
 
-      - name: Marquage de l'analyse annulée
-        if: cancelled()
+      - name: Marquage de l'analyse annulée ou en échec
+        if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANALYSIS_ID: ${{ inputs.analysis_id }}
-        run: python src/ci_analyse.py fin --analysis-id "$ANALYSIS_ID" --statut annulee
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          case "$JOB_STATUS" in
+            success) exit 0 ;;
+            cancelled) STATUT=annulee ;;
+            *) STATUT=echec ;;
+          esac
+          python src/ci_analyse.py fin --analysis-id "$ANALYSIS_ID" --statut "$STATUT"

@@ -5,7 +5,11 @@
   python src/ci_analyse.py fin --analysis-id N --statut annulee|echec
 
 Variables d'environnement : DATABASE_URL (obligatoire), GITHUB_RUN_ID (run_id), MLM_CONTACT (facultatif : --contact).
-Codes retour : 0 terminee (ou rien à lancer) ; 1 échec ; 2 arguments ou configuration invalides ; 130 annulée.
+Codes retour : 0 terminee (ou rien à lancer) ; 1 échec ; 2 arguments ou configuration invalides ; 3 relance d'une
+analyse déjà en échec ; 130 annulée.
+Aucune connexion n'est gardée ouverte pendant le crawl : chaque écriture ouvre une connexion neuve, puis la ferme.
+Les messages d'erreur n'affichent que le nom du type d'exception (les messages psycopg peuvent contenir l'hôte ou
+l'utilisateur).
 Prévu pour GitHub Actions (POSIX) : le crawler tourne dans son propre groupe de processus pour que son arrêt emporte
 aussi ses processus d'exploration.
 """
@@ -18,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import store_pg
@@ -27,7 +32,9 @@ from webapp import parse_depts
 ROOT = Path(__file__).resolve().parents[1]
 JOURNAL_INTERVALLE = 20.0  # secondes entre deux écritures du journal
 ARRET_DELAI = 10.0         # secondes entre l'arrêt demandé (SIGTERM) et SIGKILL
+PAUSE_NOUVELLE_TENTATIVE = 2.0  # secondes avant la seule nouvelle tentative d'écriture du statut final
 CODE_ANNULEE = 130
+CODE_DEJA_EN_ECHEC = 3
 
 # Écrit par le gestionnaire de signal, lu par la boucle principale. Le gestionnaire ne prend aucun verrou.
 _SIGNAL = {"recu": 0}
@@ -62,29 +69,22 @@ def commande_crawler(root: Path, depts: list[str], reprise: bool, contact: str) 
     return cmd
 
 
-def _annuler(conn) -> None:
+@contextmanager
+def _connexion(url: str):
+    """Connexion neuve, fermée à la sortie du bloc."""
+    conn = store_pg.connect(url)
     try:
-        conn.rollback()
-    except Exception:  # noqa: BLE001 : la connexion peut être déjà morte
-        pass
-
-
-def _essayer(conn, action) -> bool:
-    try:
-        action()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _annuler(conn)
-        print(f"[ci_analyse] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        return False
+        yield conn
+    finally:
+        conn.close()
 
 
 class _Journal:
-    """Lignes du crawler en attente d'écriture. `lire` tourne dans un thread ; `vider` est appelé par le thread principal
-    avec sa propre connexion (aucune connexion partagée entre threads)."""
+    """Lignes du crawler en attente d'écriture. `lire` tourne dans un thread ; `vider` ouvre sa propre connexion
+    courte à chaque écriture (aucune connexion partagée entre threads, aucune connexion inactive)."""
 
-    def __init__(self, conn, analysis_id: int):
-        self.conn = conn
+    def __init__(self, url: str, analysis_id: int):
+        self.url = url
         self.analysis_id = analysis_id
         self._lignes: list[str] = []
         self._verrou = threading.Lock()
@@ -99,19 +99,28 @@ class _Journal:
             sys.stdout.write(ligne)
             sys.stdout.flush()
 
-    def vider(self) -> None:
+    def _prendre(self) -> str:
         with self._verrou:
-            if not self._lignes:
-                return
             texte = "".join(self._lignes)
             self._lignes.clear()
+        return texte
+
+    def vider(self) -> None:
+        texte = self._prendre()
+        if not texte:
+            return
         try:
-            store_pg.analysis_log(self.conn, self.analysis_id, texte)
+            with _connexion(self.url) as conn:
+                store_pg.analysis_log(conn, self.analysis_id, texte)
         except Exception as exc:  # noqa: BLE001 : un journal en échec ne doit pas interrompre l'analyse
-            _annuler(self.conn)
             with self._verrou:
                 self._lignes.insert(0, texte)  # nouvelle tentative au prochain vidage
-            print(f"[ci_analyse] journal non écrit, nouvelle tentative plus tard : {exc}", file=sys.stderr, flush=True)
+            print(f"[ci_analyse] journal non écrit, nouvelle tentative plus tard : {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
+
+    def reste(self) -> str:
+        """Retire et retourne les lignes non encore écrites (pour les écrire avec le statut final)."""
+        return self._prendre()
 
     def note(self, texte: str) -> None:
         print(texte, flush=True)
@@ -161,41 +170,75 @@ def _lancer(journal: _Journal, cmd: list[str]) -> tuple[int | None, bool]:
     return rc, interrompu
 
 
-def _publier(root: Path, conn, journal: _Journal) -> bool:
+def _publier(root: Path, url: str, journal: _Journal, depts: list[str]) -> bool:
+    """Publie les départements demandés (tous si `depts` vaut ['all']) sur une connexion neuve."""
     try:
-        res = store_pg.publish(FileSource(root), conn)
+        with _connexion(url) as conn:
+            res = store_pg.publish(FileSource(root), conn, only=depts)
     except Exception as exc:  # noqa: BLE001
-        _annuler(conn)
-        journal.note(f"[ci_analyse] publication en échec : {type(exc).__name__}: {exc}")
+        journal.note(f"[ci_analyse] publication en échec : {type(exc).__name__}")
         return False
     journal.note(f"[ci_analyse] publié : {', '.join(res['departements']) or '(aucun département)'} ; "
                  f"CSV global : {'oui' if res['csv_global'] else 'non'}")
     return True
 
 
-def _executer(url: str, conn, root: Path, analysis_id: int, depts: list[str], reprise: bool, run_id: str,
+def _ecrire_fin(url: str, analysis_id: int, statut: str, texte: str = "") -> bool:
+    """Écrit le statut final (puis la fin du journal) sur une connexion neuve. Une seule nouvelle tentative, après
+    PAUSE_NOUVELLE_TENTATIVE secondes. Retourne True si le statut a été changé (False si déjà final)."""
+    for essai in (1, 2):
+        try:
+            with _connexion(url) as conn:
+                # statut d'abord : une reprise après une écriture partielle ne duplique alors jamais le journal
+                termine = store_pg.analysis_end(conn, analysis_id, statut)
+                if texte:
+                    store_pg.analysis_log(conn, analysis_id, texte)
+                return termine
+        except Exception as exc:  # noqa: BLE001
+            if essai == 2:
+                raise
+            print(f"[ci_analyse] statut non écrit ({type(exc).__name__}), nouvelle tentative dans "
+                  f"{PAUSE_NOUVELLE_TENTATIVE:g} s", file=sys.stderr, flush=True)
+            time.sleep(PAUSE_NOUVELLE_TENTATIVE)
+    return False  # inatteignable : la boucle lève à l'essai 2
+
+
+def _executer(url: str, root: Path, analysis_id: int, depts: list[str], reprise: bool, run_id: str,
               contact: str) -> int:
-    if not store_pg.analysis_attach_run(conn, analysis_id, run_id):
-        print(f"Analyse {analysis_id} : absente ou déjà finale (annulée avant le démarrage) : rien à lancer.", flush=True)
-        return 0
-    journal_conn = store_pg.connect(url)
     try:
-        journal = _Journal(journal_conn, analysis_id)
-        rc, interrompu = _lancer(journal, commande_crawler(root, depts, reprise, contact))
-        publie = _publier(root, conn, journal)  # même en cas d'échec ou d'arrêt : un résultat partiel vaut mieux que rien
-        if interrompu:
-            statut, code = "annulee", CODE_ANNULEE
-        elif rc == 0 and publie:
-            statut, code = "terminee", 0
-        else:
-            statut, code = "echec", 1
-        journal.note(f"[ci_analyse] code retour du crawler : {rc} ; statut : {statut}")
-        journal.vider()
-        if not store_pg.analysis_end(conn, analysis_id, statut):
-            print(f"Analyse {analysis_id} : statut déjà final, inchangé.", flush=True)
-        return code
+        conn = store_pg.connect(url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Connexion à la base impossible : {type(exc).__name__}", file=sys.stderr, flush=True)
+        return 1
+    try:
+        attache = store_pg.analysis_attach_run(conn, analysis_id, run_id)
+        ligne = None if attache else store_pg.analysis_get(conn, analysis_id)
     finally:
-        journal_conn.close()
+        conn.close()
+    if not attache:
+        if ligne is None:
+            print(f"Analyse {analysis_id} : absente : rien à lancer.", flush=True)
+            return 0
+        print("Analyse déjà terminée ou annulée : rien à lancer.", flush=True)
+        return CODE_DEJA_EN_ECHEC if ligne["statut"] == "echec" else 0
+
+    journal = _Journal(url, analysis_id)
+    rc, interrompu = _lancer(journal, commande_crawler(root, depts, reprise, contact))
+    if rc is None:
+        journal.note("[ci_analyse] crawler non lancé (annulation avant démarrage) : aucune publication")
+        publie = False
+    else:
+        publie = _publier(root, url, journal, depts)  # même en cas d'échec ou d'arrêt : un résultat partiel vaut mieux que rien
+    if interrompu:
+        statut, code = "annulee", CODE_ANNULEE
+    elif rc == 0 and publie:
+        statut, code = "terminee", 0
+    else:
+        statut, code = "echec", 1
+    journal.note(f"[ci_analyse] code retour du crawler : {rc} ; statut : {statut}")
+    if not _ecrire_fin(url, analysis_id, statut, journal.reste()):
+        print(f"Analyse {analysis_id} : statut déjà final, inchangé.", flush=True)
+    return code
 
 
 def cmd_run(args) -> int:
@@ -210,21 +253,16 @@ def cmd_run(args) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, _sur_signal)
     try:
-        conn = store_pg.connect(url)
-    except Exception as exc:  # noqa: BLE001
-        print(f"Connexion à la base impossible : {exc}", file=sys.stderr, flush=True)
-        return 1
-    try:
-        return _executer(url, conn, args.root, args.analysis_id, depts, args.reprise,
+        return _executer(url, args.root, args.analysis_id, depts, args.reprise,
                          os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("MLM_CONTACT", "").strip())
     except Exception as exc:  # noqa: BLE001 : journalisé, analyse marquée en échec, code 1
-        message = f"[ci_analyse] erreur inattendue : {type(exc).__name__}: {exc}"
+        message = f"[ci_analyse] erreur inattendue : {type(exc).__name__}"
         print(message, file=sys.stderr, flush=True)
-        _essayer(conn, lambda: store_pg.analysis_log(conn, args.analysis_id, message + "\n"))
-        _essayer(conn, lambda: store_pg.analysis_end(conn, args.analysis_id, "echec"))
+        try:
+            _ecrire_fin(url, args.analysis_id, "echec", message + "\n")
+        except Exception as exc2:  # noqa: BLE001
+            print(f"[ci_analyse] statut non écrit : {type(exc2).__name__}", file=sys.stderr, flush=True)
         return 1
-    finally:
-        conn.close()
 
 
 def cmd_fin(args) -> int:
