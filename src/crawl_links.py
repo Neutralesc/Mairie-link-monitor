@@ -37,7 +37,6 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
-from urllib.robotparser import RobotFileParser
 
 import httpx
 from selectolax.lexbor import LexborHTMLParser
@@ -46,6 +45,7 @@ import csvio
 import metrics as mt
 import tuning
 from layout import DeptPaths
+from robots_rfc import RobotsRules
 from verify_urls import assess_confidence, classify_status, redirect_type, registrable
 
 log = logging.getLogger("crawl_links")
@@ -494,7 +494,7 @@ async def load_robots(client, robots_origin_url: str, site_host: str, throttle: 
     res = await fetch(client, f"{p.scheme}://{p.netloc}/robots.txt", site_host, throttle, html_only=False, timeout=timeout,
                       follow_external=True)               # RFC 9309 : au moins 5 redirections, même vers un autre domaine
     if res.status is not None and 200 <= res.status < 300:
-        rp = RobotFileParser()
+        rp = RobotsRules()
         rp.parse(res.html.splitlines())
         return rp, "ok", "", res.status
     if res.status is not None and 400 <= res.status < 500:
@@ -566,7 +566,8 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
             if rp is not None and state == "ok":
                 cd = rp.crawl_delay(UA_TOKEN) or rp.crawl_delay("*")
                 if cd:
-                    throttle.per_host[site_host] = min(max(float(cd), throttle.delay), MAX_CRAWL_DELAY)
+                    new_delay = min(max(float(cd), throttle.delay), MAX_CRAWL_DELAY)
+                    throttle.per_host[site_host] = max(throttle.per_host.get(site_host, 0), new_delay)
             robots_cache[origin] = result
         return robots_cache[origin]
 

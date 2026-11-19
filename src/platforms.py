@@ -104,7 +104,8 @@ async def walk(start: list[tuple[str, str, str]], index: dict, depts: set[str], 
         if rp is not None:
             cd = rp.crawl_delay(cl.UA_TOKEN) or rp.crawl_delay("*")
             if cd:
-                throttle.per_host[cl.PP_HOST] = min(max(float(cd), throttle.delay), cl.MAX_CRAWL_DELAY)
+                new_delay = min(max(float(cd), throttle.delay), cl.MAX_CRAWL_DELAY)
+                throttle.per_host[cl.PP_HOST] = max(throttle.per_host.get(cl.PP_HOST, 0), new_delay)
         while queue and len(pages) < MAX_PAGES:
             url, code, source = queue.popleft()
             row = {"url_page": url, "code_insee": code, "source": source, "liens": [], "date_controle": now}
