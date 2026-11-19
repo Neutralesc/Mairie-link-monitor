@@ -20,6 +20,7 @@ class EntierTests(unittest.TestCase):
         self.assertEqual(ci_analyse._entier(" 12 "), 12)
 
 
+@unittest.skipIf(bool(sp.RAISON_PG), sp.RAISON_PG)
 class CiLancementDirectPgTests(sp.PgSchemaTestCase):
     def setUp(self):
         self.vider_tables()
