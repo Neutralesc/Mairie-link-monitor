@@ -1,6 +1,6 @@
 """Lot 5 - Compte rendu HTML d'un département (fichier autonome, lisible sans le programme).
 
-Pages en charte DSFR 1.15.4 (ressources locales dans src/static/dsfr, aucun CDN).
+Pages en charte DSFR 1.15.4 (ressources locales dans public/static/dsfr, aucun CDN).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import history
 import results
 from layout import DeptPaths
 
-STATIC_DSFR = Path(__file__).resolve().parent / "static" / "dsfr"
+STATIC_DSFR = Path(__file__).resolve().parent.parent / "public" / "static" / "dsfr"   # servi aussi par Vercel (public/)
 STATIC_PREFIX_WEB = "/static/dsfr"  # chemin servi par webapp.py
 # Seule règle propre au projet : les journaux (pre) doivent passer à la ligne.
 STYLE_PROJET = ".mlm-journal { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }"

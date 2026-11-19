@@ -36,7 +36,7 @@ STATIC_MIME = {".css": "text/css; charset=utf-8", ".js": "text/javascript; chars
 
 
 def static_file(rel: str) -> Path | None:
-    """Fichier de src/static/dsfr demandé, ou None (chemin suspect, type non servi, absent)."""
+    """Fichier de public/static/dsfr demandé, ou None (chemin suspect, type non servi, absent)."""
     rel = unquote(rel)
     if not rel or "\x00" in rel or "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/")):
         return None
