@@ -385,7 +385,7 @@ class WorkflowAnalyseTests(unittest.TestCase):
 
     def test_etape_finale_always_avec_job_status_par_env(self):
         finale = self.etapes[-1]
-        self.assertEqual(finale.get("if"), "always()")
+        self.assertTrue(finale.get("if", "").startswith("always()"), finale.get("if"))   # + condition « pas republier »
         self.assertEqual(finale.get("env", {}).get("JOB_STATUS"), "${{ job.status }}")
         self.assertIn("$JOB_STATUS", finale["run"])            # lu depuis l'environnement, pas interpolé
 
