@@ -15,6 +15,10 @@ on:
         description: "Reprendre l'analyse précédente"
         type: boolean
         default: false
+      republier:
+        description: "Republier en base les résultats déjà en cache, sans refaire l'analyse (depts : codes ou « tous »)"
+        type: boolean
+        default: false
       analysis_id:
         description: "Identifiant de la ligne analyses (laisser 0 pour un lancement direct : l'analyse est créée ici)"
         type: string
@@ -59,18 +63,23 @@ jobs:
         env:
           DEPTS: ${{ inputs.depts }}
           REPRISE: ${{ inputs.reprise }}
+          REPUBLIER: ${{ inputs.republier }}
           ANALYSIS_ID: ${{ inputs.analysis_id }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MLM_CONTACT: ${{ vars.MLM_CONTACT }}
         run: |
-          flags=()
-          if [ "$REPRISE" = "true" ]; then
-            flags+=(--reprise)
+          if [ "$REPUBLIER" = "true" ]; then
+            python src/ci_analyse.py republier --depts "$DEPTS"
+          else
+            flags=()
+            if [ "$REPRISE" = "true" ]; then
+              flags+=(--reprise)
+            fi
+            python src/ci_analyse.py run --analysis-id "$ANALYSIS_ID" --depts "$DEPTS" "${flags[@]}"
           fi
-          python src/ci_analyse.py run --analysis-id "$ANALYSIS_ID" --depts "$DEPTS" "${flags[@]}"
 
       - name: Sauvegarde de l'état
-        if: always()
+        if: always() && inputs.republier != true
         uses: actions/cache/save@v4
         with:
           path: |
@@ -80,7 +89,7 @@ jobs:
           key: mlm-etat-${{ github.run_id }}
 
       - name: Marquage de l'analyse annulée ou en échec
-        if: always()
+        if: always() && inputs.republier != true
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANALYSIS_ID: ${{ inputs.analysis_id }}
