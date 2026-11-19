@@ -8,6 +8,8 @@ module est absent. Aucune URL ni secret n'est écrit ici : l'URL vient toujours 
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from publications import CSV_TOUS, Publication, PublicationSource
@@ -117,30 +119,31 @@ def publish(source: PublicationSource, conn) -> dict[str, Any]:
     return {"departements": published, "csv_global": csv_global}
 
 
+CACHE_LEGER_S = 5.0  # durée de validité du cache des champs légers (accueil)
+
+_COLS_LEGERES = ("dept, controle_date, communes, avec_lien, ''::text AS report_html, ''::bytea AS csv_bytes, "
+                 "csv_present, resume_changements")
+
+
 class PostgresSource:
-    """Lecture seule des publications dans Postgres ; une connexion courte par appel."""
+    """Lecture seule des publications dans Postgres ; une connexion courte par appel.
+
+    `depts()` lit en une requête les champs légers de tous les départements (sans compte rendu ni CSV) et les garde
+    5 s : `get(d, report=False, csv=False)` sert alors depuis ce cache, sans connexion. `get` avec `report` ou `csv`
+    demandés fait une requête ciblée sur ce seul département.
+    """
 
     def __init__(self, url: str):
         self.url = url
+        self._verrou = threading.Lock()
+        self._leger: tuple[float, dict[str, Publication]] | None = None
         _psycopg()  # erreur claire dès la construction si psycopg manque
 
     def _connect(self):
         return _psycopg().connect(self.url)
 
-    def depts(self) -> list[str]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT dept FROM publications").fetchall()
-        return sorted(r[0] for r in rows)
-
-    def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None:
-        cols = ("dept, controle_date, communes, avec_lien, "
-                + ("report_html" if report else "''::text AS report_html") + ", "
-                + ("csv_bytes" if csv else "''::bytea AS csv_bytes") + ", "
-                + "csv_present, resume_changements")
-        with self._connect() as conn:
-            row = conn.execute(f"SELECT {cols} FROM publications WHERE dept = %s", (dept,)).fetchone()
-        if row is None:
-            return None
+    @staticmethod
+    def _publication(row) -> Publication:
         return Publication(
             dept=row[0],
             controle_date=row[1],
@@ -151,6 +154,33 @@ class PostgresSource:
             csv_present=row[6],
             resume_changements=row[7],
         )
+
+    def _cache_frais(self) -> dict[str, Publication] | None:
+        with self._verrou:
+            if self._leger is not None and time.monotonic() - self._leger[0] < CACHE_LEGER_S:
+                return self._leger[1]
+        return None
+
+    def depts(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT {_COLS_LEGERES} FROM publications").fetchall()
+        leger = {r[0]: self._publication(r) for r in rows}
+        with self._verrou:
+            self._leger = (time.monotonic(), leger)
+        return sorted(leger)
+
+    def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None:
+        if not report and not csv:
+            pub = (self._cache_frais() or {}).get(dept)
+            if pub is not None:
+                return pub
+        cols = ("dept, controle_date, communes, avec_lien, "
+                + ("report_html" if report else "''::text AS report_html") + ", "
+                + ("csv_bytes" if csv else "''::bytea AS csv_bytes") + ", "
+                + "csv_present, resume_changements")
+        with self._connect() as conn:
+            row = conn.execute(f"SELECT {cols} FROM publications WHERE dept = %s", (dept,)).fetchone()
+        return None if row is None else self._publication(row)
 
     def csv_all(self) -> bytes | None:
         with self._connect() as conn:
