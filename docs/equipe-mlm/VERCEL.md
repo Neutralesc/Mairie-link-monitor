@@ -1,59 +1,47 @@
-# Design : exécution sur Vercel (crawl déclenché depuis l'interface)
+# Design : interface sur Vercel, crawl dans GitHub Actions
 
-Statut : **proposition, à valider**. Décisions déjà prises par l'utilisateur : crawl déclenché depuis Vercel ; stockage Postgres (Neon via Vercel) ; politesse du crawler inchangée (robots.txt RFC 9309, délais par site).
+Statut : **validé par l'utilisateur** (plan Vercel Hobby ; crawl hors Vercel, tant que c'est gratuit ; stockage Postgres Neon). Politesse du crawler inchangée (robots.txt RFC 9309, délais par site).
 
-## 1. Contraintes Vercel qui structurent tout
+## 1. Pourquoi cette répartition
 | Contrainte | Conséquence |
 |---|---|
-| Fonction = requête/réponse, durée plafonnée (environ 300 s par défaut, davantage selon le plan) | Impossible de faire tourner un crawl de département d'un seul tenant : il faut des **lots courts** enchaînés. |
-| Pas de processus d'arrière-plan, pas de `subprocess` durable | Le `Runner` actuel (processus enfant + journal fichier) disparaît. |
-| Disque éphémère (`/tmp` seulement, perdu entre invocations) | `data/`, `reports/`, `resultats/` et `historique.sqlite` doivent vivre en **Postgres**. |
-| Fichiers statiques servis depuis `public/` | Les ressources DSFR passent de `src/static/dsfr/` à `public/static/dsfr/`. |
-| Pas de multi-processus fiable | `--processes` vaut 1 sur Vercel ; la concurrence asyncio (déjà élevée) est conservée. |
+| Vercel Hobby : fonctions courtes, pas de processus d'arrière-plan, disque éphémère | Le crawl ne tourne **pas** sur Vercel. Vercel ne sert que l'interface, en lecture, et déclenche l'analyse. |
+| IP Vercel = hébergeur cloud (certains sites de mairies bloquent) | Autre raison de garder le crawl ailleurs. Les IP de GitHub Actions sont aussi des IP cloud : à mesurer, le rappel peut baisser. |
+| GitHub Actions : gratuit (minutes illimitées si dépôt public, quota mensuel sinon), un job peut durer jusqu'à 6 h, disque disponible | Le pipeline actuel (fichiers CSV + SQLite) tourne **tel quel** dans un job. Aucun découpage en lots nécessaire. |
 
 ## 2. Architecture
 ```
-Navigateur ── /            Interface DSFR (api/index.py, WSGI/handler) ── lecture Postgres
-          ── POST /lancer  crée un « job » (départements) en base, répond tout de suite
-          ── GET /api/etat avancement (jobs, lots terminés / total)
-Vercel Cron (1/min) ou auto-appel ── /api/step  ── traite UN lot puis planifie le suivant
-Postgres (Neon) : jobs, lots, communes, urls, resultats_crawl, historique, journal
+Navigateur ─ Vercel (api/index.py, DSFR) ─ lit ─▶ Postgres (Neon)
+     │ POST /lancer
+     └──▶ GitHub API : workflow_dispatch (dépts, reprise) ─▶ GitHub Actions
+                         job : python src/mairie_link_monitor.py run …  (fichiers locaux au runner)
+                         puis : python src/mairie_link_monitor.py publier ─▶ écrit dans Postgres
 ```
-- **Job** = une analyse demandée (départements, reprise). **Lot** = un ensemble borné de sites (ex. 150 sites, calibré pour tenir sous ~240 s).
-- `/api/step` prend le lot « à faire » le plus ancien (verrou `FOR UPDATE SKIP LOCKED`), exécute `crawl_links.crawl_all` sur ces sites avec `site_timeout` et durée de lot bornés, écrit les résultats, marque le lot terminé. Si des lots restent, il se ré-invoque (POST authentifié par secret interne) ; Vercel Cron sert de filet de reprise si la chaîne se rompt.
-- Étapes d'un job, chacune découpée en lots : inventaire (DILA/COG) → vérification URL → découverte → crawl → plateformes (PanneauPocket) → historique + compte rendu. Les comptes rendus HTML sont **générés à la demande** depuis Postgres (plus de fichiers).
-- Le « pool global de requêtes » multi-départements est conservé **dans un lot** ; la politesse par site (Throttle, robots.txt) reste dans le processus du lot. Un même site n'est jamais dans deux lots simultanés d'un job.
-- Arrêt d'une analyse : drapeau `job.annule` lu entre deux lots (et par le lot en cours via un contrôle périodique).
+- **Publication** = par département : compte rendu HTML complet, CSV de résultat, date du contrôle, nombre de communes et de communes avec lien ; plus le CSV global. Postgres ne contient donc que ce que l'interface affiche.
+- **État de l'analyse** : table `analyses` (id, départements, statut file/en cours/terminée/échec, début, fin, dernières lignes du journal) mise à jour par le workflow (début, fin, journal toutes les minutes). L'interface lit cette table pour le suivi.
+- **Reprise entre deux exécutions** (`--resume`) : le dossier `data/` + `reports/` + `historique.sqlite` est sauvegardé/restauré par `actions/cache` (ou artefact), clé par département.
+- **Arrêt** : l'interface demande l'annulation du run via l'API GitHub ; le crawler conserve ses points de sauvegarde (reprise possible).
+- **Sécurité** : mot de passe Basic de l'interface (variable `MLM_PASSWORD`, obligatoire en ligne) ; jeton GitHub à portée minimale (déclencher/annuler un workflow de ce dépôt) en variable Vercel ; `DATABASE_URL` en secret GitHub **et** Vercel ; aucun secret dans le dépôt.
 
-## 3. Couche de stockage (la clé de la migration)
-Aujourd'hui, `inventory`, `verify_urls`, `discover`, `crawl_links`, `platforms`, `coverage`, `results`, `history` lisent/écrivent des CSV via `layout.DeptPaths` et `csvio`. Plan :
-1. Introduire un module `store.py` (interface : lire/écrire les « tables » CSV par département, enregistrer l'historique), avec deux implémentations : **fichiers** (comportement actuel, pour usage local et tests) et **Postgres**.
-2. Les modules existants appellent `store` au lieu des chemins directs, sans changer leur logique. Tests existants conservés (backend fichiers).
-3. Tables Postgres : une table par CSV d'origine (clé `(dept, code_insee, …)`), table `historique` équivalente au SQLite actuel, tables `jobs`/`lots`/`journal`.
-Dépendance ajoutée : `psycopg[binary]` (seulement chargée en mode Postgres).
+## 3. Interface de lecture (migration par couches)
+`src/publications.py` : `Publication` + protocole `PublicationSource` (`depts()`, `get(dept)`, `csv_all()`). Deux implémentations :
+- `FileSource(root)` : comportement actuel (fichiers + SQLite), usage local et tests.
+- `PostgresSource(url)` : lecture des publications dans Neon (Vercel).
+`webapp.py` ne lit plus que `source`. Le `Runner` local (processus enfant) reste pour l'usage local ; en ligne il est remplacé par un `ActionsRunner` (déclenche/annule le workflow, lit `analyses`).
 
-## 4. Interface
-- `webapp.py` : la logique de rendu (`home`, `report.render`) reste ; le serveur `http.server` est conservé pour le local ; un adaptateur `api/index.py` expose les mêmes routes sur Vercel. Authentification Basic conservée, mot de passe en variable d'environnement `MLM_PASSWORD`, **obligatoire** en ligne.
-- Suivi : la page interroge `/api/etat` (actualisation contrôlée par l'utilisateur, déjà en place) ; le journal vient de la table `journal`.
-- Téléchargement CSV : généré à la volée depuis Postgres.
-
-## 5. Variables d'environnement Vercel
-`DATABASE_URL` (Neon), `MLM_PASSWORD`, `MLM_STEP_SECRET` (auto-appel / cron), `MLM_CONTACT` (e-mail du User-Agent), réglages de lot (`MLM_LOT_SITES`, `MLM_LOT_SECONDS`). Aucun secret dans le dépôt.
-
-## 6. Découpage en missions (après validation)
+## 4. Missions
 | Vague | Mission | Agent | Dépend de |
 |---|---|---|---|
-| S1 | `store.py` + backend fichiers (extraction sans changement de comportement) | developpeur-backend | — |
-| S2 | Backend Postgres + schéma SQL + migration | developpeur-backend | S1 |
-| S3 | Lots et orchestration (`jobs`, `lots`, `api/step`), arrêt/reprise | developpeur-backend | S2 |
-| S4 | Adaptateur Vercel (`api/`, `vercel.json`, `public/static/dsfr`, `requirements.txt`) + interface `/api/etat` | developpeur-frontend + backend | S3 |
-| S5 | Tests (backend fichiers, Postgres via base de test locale, lots, annulation) | testeur-qa | S1–S4 |
-| S6 | Revue fiabilité de l'orchestration (verrous, reprise, doublons) | analyste-fiabilite | S3 |
-Chaque mission est courte (haiku) ; j'impose interfaces et schéma SQL avant chaque vague.
+| S1 | `publications.py` + `FileSource`, branchement de `webapp.py` (sans changement de comportement) | developpeur-backend | — |
+| S2 | `publier.py` (fichiers → Postgres, schéma SQL, tables `publications` et `analyses`) + `PostgresSource` (`psycopg[binary]`, chargé seulement en mode Postgres) + sous-commande `publier` | developpeur-backend | S1 |
+| S3 | Workflow `.github/workflows/analyse.yml` (dispatch, cache, publication, journal) + `ActionsRunner` (dispatch/annulation via API GitHub, lecture de `analyses`) | developpeur-backend | S2 |
+| S4 | Adaptateur Vercel : `api/index.py`, `vercel.json`, `public/static/dsfr` (déplacement des ressources), `requirements.txt` | developpeur-frontend | S2 |
+| S5 | Tests : `FileSource` / `PostgresSource` (base Postgres locale de test si disponible, sinon fakes), publication, `ActionsRunner` avec API simulée | testeur-qa | S1–S4 |
+| S6 | Revue fiabilité (publication partielle, concurrence de deux analyses, secrets) | analyste-fiabilite | S3 |
+| Parallèle | Points de débit de l'audit (16 à 19) dans `crawl_links.py` / `platforms.py` | developpeur-backend | — |
 
-## 7. Risques et points ouverts
-- **Débit réel** par lot à mesurer (aucune mesure possible depuis ce bac à sable sans crawl réel) : réglage de `MLM_LOT_SITES`.
-- **Durée maximale** de fonction selon le plan Vercel de l'utilisateur : à confirmer (détermine la taille des lots).
-- **Crawl depuis des IP Vercel** : certains sites bloquent les hébergeurs cloud ; le rappel peut baisser, à mesurer.
-- **Inventaire DILA/COG** : téléchargements volumineux ; mis en cache en base.
-- Pas de test possible contre un vrai Neon ici : base Postgres locale pour les tests, validation finale sur un déploiement réel par l'utilisateur.
+## 5. Risques et points ouverts
+- **Rappel depuis des IP cloud** : à mesurer sur un département test après déploiement ; pas mesurable depuis ce bac à sable.
+- **Quota Actions** si le dépôt est privé : une analyse de toute la France peut dépasser le quota gratuit mensuel ; analyser par départements ou rendre le dépôt public (à décider par l'utilisateur).
+- **Neon gratuit** : stockage limité (publications seules : quelques Mo par département, largement suffisant).
+- **Pas de test possible** ici contre un vrai Neon, Vercel ou GitHub Actions : tests locaux avec fakes ; validation finale par l'utilisateur sur un déploiement réel (je fournirai la liste des étapes).

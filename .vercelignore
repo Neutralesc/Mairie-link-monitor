@@ -1,0 +1,9 @@
+# Déploiement Vercel : le crawl n'y tourne pas (il est dans GitHub Actions).
+tests/
+docs/
+data/
+reports/
+resultats/
+.claude/
+.github/
+.team-architect/

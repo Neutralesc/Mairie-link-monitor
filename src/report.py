@@ -1,10 +1,11 @@
 """Lot 5 - Compte rendu HTML d'un département (fichier autonome, lisible sans le programme).
 
-Pages en charte DSFR 1.15.4 (ressources locales dans src/static/dsfr, aucun CDN).
+Pages en charte DSFR 1.15.4 (ressources locales dans public/static/dsfr, aucun CDN).
 """
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -16,7 +17,7 @@ import history
 import results
 from layout import DeptPaths
 
-STATIC_DSFR = Path(__file__).resolve().parent / "static" / "dsfr"
+STATIC_DSFR = Path(__file__).resolve().parent.parent / "public" / "static" / "dsfr"   # servi aussi par Vercel (public/)
 STATIC_PREFIX_WEB = "/static/dsfr"  # chemin servi par webapp.py
 # Seule règle propre au projet : les journaux (pre) doivent passer à la ligne.
 STYLE_PROJET = ".mlm-journal { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }"
@@ -77,9 +78,17 @@ def page(title: str, body: str, refresh: int | None = None, static_prefix: str =
     )
 
 
+SCHEMAS_LIENS_RE = re.compile(r"https?://", re.IGNORECASE)
+
+
 def link(url: str) -> str:
+    """Lien vers une page web : seulement http(s) ; tout autre schéma (javascript:, data:…) est affiché sans lien."""
+    if not url:
+        return ""
+    if not SCHEMAS_LIENS_RE.match(url):
+        return escape(url)
     return (f'<a href="{escape(url)}" rel="noopener noreferrer" target="_blank">{escape(url)}'
-            '<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>') if url else ""
+            '<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>')
 
 
 def source(url: str) -> str:

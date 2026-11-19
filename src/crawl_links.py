@@ -18,6 +18,7 @@ Principes :
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import heapq
 import ipaddress
 import itertools
@@ -857,6 +858,10 @@ async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None,
                     on_metrics=None) -> list[SiteResult]:
     """File de sites traitée par `concurrency` tâches asyncio. Plafond de sites simultanés par domaine d'hébergement."""
     tune_runtime(opts["concurrency"])
+    # resolve() passe par l'exécuteur par défaut de la boucle (getaddrinfo asyncio), pas par le limiteur anyio : on le
+    # dimensionne d'après le nombre de résolutions simultanées autorisées, sans quoi elles font la queue (timeouts).
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=max(32, 2 * max(1, opts.get("dns_simultanees", 16)))))
     ua = f"{UA_BASE} {opts.get('contact', '')}".strip()
     limits = httpx.Limits(max_connections=opts["concurrency"] * 2 + 10, max_keepalive_connections=opts["concurrency"])
     kw = dict(follow_redirects=False, timeout=opts["timeout"], transport=transport, limits=limits,
