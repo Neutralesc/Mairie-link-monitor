@@ -41,7 +41,8 @@ from layout import DeptPaths, legacy_map, normalize_dept
 
 log = logging.getLogger("mairie_link_monitor")
 ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = ("run", "export", "reclassify", "migrate-legacy", "compare", "coverage", "tune", "web", "rapport", "historique")
+COMMANDS = ("run", "export", "reclassify", "migrate-legacy", "compare", "coverage", "tune", "web", "rapport", "historique",
+            "publier")
 
 
 # ----------------------------------------------------------------- départements
@@ -387,6 +388,28 @@ def cmd_historique(args) -> int:
     return 0
 
 
+def cmd_publier(args) -> int:
+    """Publie les résultats locaux (reports/, resultats/) dans la base Postgres (lecture seule côté interface)."""
+    import store_pg
+    from publications import FileSource
+    if not args.database_url:
+        log.error("Aucune base indiquée : option --database-url ou variable d'environnement DATABASE_URL")
+        return 2
+    try:
+        conn = store_pg.connect(args.database_url)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 2
+    try:
+        store_pg.ensure_schema(conn)
+        res = store_pg.publish(FileSource(args.root), conn)
+    finally:
+        conn.close()
+    print(f"Publié : {', '.join(res['departements']) or '(aucun département)'} ; "
+          f"CSV global : {'oui' if res['csv_global'] else 'non'}")
+    return 0
+
+
 def cmd_web(args) -> int:
     import webapp
     try:
@@ -562,6 +585,11 @@ def build_parser() -> argparse.ArgumentParser:
     hi = sub.add_parser("historique", help="affiche les liens nouveaux et disparus depuis le contrôle précédent")
     dept_arg(hi)
     hi.set_defaults(func=cmd_historique)
+
+    pu = sub.add_parser("publier", help="publie les résultats dans la base Postgres (interface web Vercel)")
+    pu.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
+                    help="URL Postgres (défaut : variable d'environnement DATABASE_URL)")
+    pu.set_defaults(func=cmd_publier)
 
     tn = sub.add_parser("tune", help="analyse les mesures de performance et recommande un réglage du parallélisme")
     tn.add_argument("--file", type=Path, default=None, help="fichier de mesures (défaut : le plus récent)")
