@@ -25,17 +25,39 @@ MINISTERES = ("Ministères<br>Transition écologique<br>Aménagement du territoi
 ALERTE_PAR_CLASSE = {"ok": "success", "alerte": "error", "attention": "warning"}
 
 
-def header(accueil: str | None) -> str:
+# Menu principal (web uniquement) : (clé `active`, libellé, chemin).
+ENTREES_MENU = (("analyses", "Analyses", "/"), ("resultats", "Résultats", "/resultats"))
+
+
+def menu_principal(active: str) -> tuple[str, str]:
+    """Bouton d'ouverture du menu mobile (dans l'en-tête) et panneau de menu DSFR, avec l'entrée `active` marquée."""
+    courante = ' aria-current="page"'
+    items = "".join('<li class="fr-nav__item"><a class="fr-nav__link" href="%s" target="_self"%s>%s</a></li>'
+                    % (chemin, courante if cle == active else "", libelle)
+                    for cle, libelle, chemin in ENTREES_MENU)
+    bouton = ('<div class="fr-header__navbar"><button class="fr-btn--menu fr-btn" data-fr-opened="false" '
+              'aria-controls="modal-menu" aria-haspopup="menu" id="button-open-menu" title="Menu">Menu</button></div>')
+    panneau = ('<div class="fr-header__menu fr-modal" id="modal-menu" aria-labelledby="button-open-menu"><div class="fr-container">'
+               '<button class="fr-btn--close fr-btn" aria-controls="modal-menu" title="Fermer">Fermer</button>'
+               '<div class="fr-header__menu-links"></div>'
+               '<nav class="fr-nav" id="navigation" role="navigation" aria-label="Menu principal">'
+               f'<ul class="fr-nav__list">{items}</ul></nav></div></div>')
+    return bouton, panneau
+
+
+def header(accueil: str | None, active: str = "") -> str:
     titre = '<p class="fr-header__service-title">Mairie Link Monitor</p>'
+    bouton, panneau = ("", "")
     if accueil:
         titre = f'<a href="{accueil}" title="Accueil - Mairie Link Monitor">{titre}</a>'
+        bouton, panneau = menu_principal(active)
     return ('<header role="banner" class="fr-header"><div class="fr-header__body"><div class="fr-container">'
             '<div class="fr-header__body-row"><div class="fr-header__brand fr-enlarge-link">'
             '<div class="fr-header__brand-top"><div class="fr-header__logo">'
             f'<p class="fr-logo">{MINISTERES}</p></div></div>'
             f'<div class="fr-header__service">{titre}'
             '<p class="fr-header__service-tagline">Suivi des liens vers Vos Questions dans les sites de mairies</p>'
-            "</div></div></div></div></div></header>")
+            f"</div></div>{bouton}</div></div></div>{panneau}</header>")
 
 
 def footer() -> str:
@@ -47,9 +69,11 @@ def footer() -> str:
 SUFFIXE_TITRE = "Mairie Link Monitor"
 
 
-def page(title: str, body: str, refresh: int | None = None, static_prefix: str = STATIC_PREFIX_WEB) -> str:
+def page(title: str, body: str, refresh: int | None = None, static_prefix: str = STATIC_PREFIX_WEB,
+         active: str = "") -> str:
     """Page complète. `refresh` est conservé pour compatibilité mais ne produit plus de meta refresh (RGAA 13.1) :
-    l'actualisation automatique est un contrôle utilisateur placé dans le corps de l'accueil (webapp.home)."""
+    l'actualisation automatique est un contrôle utilisateur placé dans le corps de l'accueil (webapp.home).
+    `active` ("analyses", "resultats" ou "") marque l'entrée courante du menu, affiché seulement sur le web."""
     sp = escape(static_prefix)
     titre = escape(title if title.endswith(SUFFIXE_TITRE) else f"{title} – {SUFFIXE_TITRE}")
     # Lien d'accueil seulement sur le web : un fichier écrit sur disque n'a pas de racine « / ».
@@ -69,7 +93,7 @@ def page(title: str, body: str, refresh: int | None = None, static_prefix: str =
         '<div class="fr-skiplinks"><nav class="fr-container" role="navigation" aria-label="Accès rapide">'
         '<ul class="fr-skiplinks__list"><li><a class="fr-link" href="#content">Aller au contenu</a></li></ul>'
         "</nav></div>"
-        f"{header(accueil)}"
+        f"{header(accueil, active)}"
         f'<main id="content" role="main"><div class="fr-container fr-my-4w">{body}</div></main>'
         f"{footer()}"
         f'<script type="module" src="{sp}/dsfr.module.min.js"></script>'
@@ -175,7 +199,8 @@ def render(paths: DeptPaths, db: Path, static_prefix: str = STATIC_PREFIX_WEB) -
                          for s in unread], "Aucune.", caption="Communes non lues ou lues partiellement") + "</details>")
     body.append('<p class="fr-hint-text">« Aucun lien » n\'est certain que pour un site lu en entier (dans les limites fixées) '
                 "ou une page PanneauPocket lue. Les sites construits en JavaScript ne sont pas lus.</p>")
-    return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix)  # suffixe ajouté par page()
+    return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix,
+                active="analyses")  # suffixe ajouté par page()
 
 
 def write(paths: DeptPaths, db: Path) -> Path:

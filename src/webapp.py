@@ -17,10 +17,11 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import report
 from layout import normalize_dept
@@ -181,7 +182,111 @@ def home(root: Path, runner: Runner, message: str = "", source: PublicationSourc
                                   "Aucun département analysé pour l'instant.", caption="Résultats par département"))
     if csv_global:
         parts.append('<p><a class="fr-link" href="/csv/tous">Télécharger le CSV de tous les départements</a></p>')
-    return report.page("Liens Vos questions", "\n".join(parts))
+    return report.page("Liens Vos questions", "\n".join(parts), active="analyses")
+
+
+RESULTATS_PAR_PAGE = 100
+RECHERCHE_MAX = 80  # caractères retenus pour la recherche libre
+LIBELLE_RESULTATS = "Communes dont le site contient un lien vers Vos Questions"
+
+
+def sans_accents(texte: str) -> str:
+    """Minuscules sans accents : comparaison insensible à la casse et aux accents."""
+    decompose = unicodedata.normalize("NFD", texte)
+    return "".join(c for c in decompose if unicodedata.category(c) != "Mn").casefold()
+
+
+def url_resultats(dept: str, q: str, page_num: int) -> str:
+    """Lien vers /resultats en conservant le filtre de département et la recherche (encodés, donc sûrs)."""
+    params = {"page": str(page_num)}
+    if dept:
+        params["dept"] = dept
+    if q:
+        params["q"] = q
+    return "/resultats?" + urlencode(params)
+
+
+def pagination(dept: str, q: str, courante: int, total: int) -> str:
+    def lien(p: int, libelle: str, classe: str = "", attributs: str = "") -> str:
+        href = escape(url_resultats(dept, q, p), quote=True)
+        return f'<li><a class="fr-pagination__link{classe}" href="{href}"{attributs}>{libelle}</a></li>'
+
+    items = []
+    if courante > 1:
+        items.append(lien(courante - 1, "Précédent", " fr-pagination__link--prev fr-pagination__link--lg-label"))
+    trou = False
+    for p in range(1, total + 1):
+        if p in (1, total) or abs(p - courante) <= 2:
+            trou = False
+            if p == courante:
+                items.append(lien(p, str(p), attributs=' aria-current="page"'))
+            else:
+                items.append(lien(p, str(p), attributs=f' title="Page {p}"'))
+        elif not trou:
+            trou = True
+            items.append("<li>…</li>")
+    if courante < total:
+        items.append(lien(courante + 1, "Suivant", " fr-pagination__link--next fr-pagination__link--lg-label"))
+    return ('<nav class="fr-pagination" role="navigation" aria-label="Pagination">'
+            f'<ul class="fr-pagination__list">{"".join(items)}</ul></nav>')
+
+
+def resultats(source: PublicationSource, params: dict[str, list[str]]) -> str:
+    """Page « Résultats » : communes avec lien, filtrées par département et recherche, paginées."""
+    dept = params.get("dept", [""])[0].strip()
+    if dept and not DEPT_RE.match(dept):
+        dept = ""
+    q = params.get("q", [""])[0][:RECHERCHE_MAX].strip()
+    try:
+        numero = int(params.get("page", ["1"])[0])
+    except ValueError:
+        numero = 1
+    numero = max(numero, 1)
+
+    base = source.liens(dept or None)
+    cle = sans_accents(q)
+    lignes = [ligne for ligne in base
+              if not cle or cle in sans_accents(ligne["nom_commune"]) or cle in sans_accents(ligne["code_insee"])]
+    total = max(1, -(-len(lignes) // RESULTATS_PAR_PAGE))
+    numero = min(numero, total)
+    debut = (numero - 1) * RESULTATS_PAR_PAGE
+    tranche = lignes[debut:debut + RESULTATS_PAR_PAGE]
+
+    options = '<option value="">Tous les départements</option>' + "".join(
+        f'<option value="{escape(d, quote=True)}"{" selected" if d == dept else ""}>{escape(d)}</option>'
+        for d in source.depts())
+    formulaire = ('<form method="get" action="/resultats" role="search" class="fr-mb-4w">'
+                  '<div class="fr-grid-row fr-grid-row--gutters fr-grid-row--bottom">'
+                  '<div class="fr-col-12 fr-col-md-3"><div class="fr-select-group">'
+                  '<label class="fr-label" for="dept">Département</label>'
+                  f'<select class="fr-select" id="dept" name="dept">{options}</select></div></div>'
+                  '<div class="fr-col-12 fr-col-md-5"><div class="fr-input-group">'
+                  '<label class="fr-label" for="q">Rechercher une commune ou un code INSEE</label>'
+                  f'<input class="fr-input" id="q" name="q" type="text" value="{escape(q, quote=True)}"></div></div>'
+                  '<div class="fr-col-12 fr-col-md-4">'
+                  '<button class="fr-btn" type="submit">Rechercher</button> '
+                  '<a class="fr-link" href="/resultats">Réinitialiser</a></div>'
+                  "</div></form>")
+
+    n = len(lignes)
+    parts = ["<h1>Résultats</h1>",
+             f'<p class="fr-text--lead">{LIBELLE_RESULTATS}</p>',
+             formulaire,
+             f'<p><strong>{n} commune{"s" if n > 1 else ""} avec lien</strong></p>']
+    if not base:
+        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w"><p>Aucun résultat publié pour le moment : '
+                     "lancez une analyse depuis l'onglet Analyses.</p></div>")
+    elif not lignes:
+        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w"><p>Aucune commune ne correspond à votre recherche.</p>'
+                     "</div>")
+    else:
+        rows = [[escape(ligne["dept"]), escape(ligne["nom_commune"]), escape(ligne["code_insee"]),
+                 report.link(ligne["url_page"])] for ligne in tranche]
+        parts.append(report.table(["Département", "Commune", "Code INSEE", "Page du lien"], rows, "",
+                                  caption=LIBELLE_RESULTATS))
+        if total > 1:
+            parts.append(pagination(dept, q, numero, total))
+    return report.page("Résultats", "\n".join(parts), active="resultats")
 
 
 def make_handler(root: Path, runner: Runner, password: str, source: PublicationSource | None = None):
@@ -251,6 +356,11 @@ def make_handler(root: Path, runner: Runner, password: str, source: PublicationS
                 return
             if path == "/":
                 return self.send(200, home(root, runner, source=source))
+            if path == "/resultats":
+                try:
+                    return self.send(200, resultats(source, parse_qs(urlsplit(self.path).query, keep_blank_values=True)))
+                except SourceIndisponible:
+                    return self.indisponible()
             m = re.fullmatch(r"/rapport/([0-9AB]{2,3})", path)
             if m:
                 try:

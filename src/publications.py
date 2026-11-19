@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import coverage
 import history
 import report as report_module
+import results
 from layout import DeptPaths
 
 DEPT_RE = re.compile(r"^(\d{2,3}|2[AB])$")
@@ -35,8 +37,15 @@ class Publication:
     resume_changements: str   # ligne « Changements » de l'accueil ('' s'il n'y a aucun contrôle)
 
 
+def trier_liens(rows: list[dict]) -> list[dict]:
+    """Tri commun aux implémentations : dept, puis nom_commune (insensible à la casse), puis code_insee."""
+    return sorted(rows, key=lambda r: (r["dept"], r["nom_commune"].casefold(), r["code_insee"]))
+
+
 class PublicationSource(Protocol):
     def depts(self) -> list[str]: ...                    # codes triés
+    # communes avec lien : {dept, code_insee, nom_commune, url_page}, triées ; dept=None = tous ; inconnu = []
+    def liens(self, dept: str | None = None) -> list[dict]: ...
     # None si département inconnu ; report=False / csv=False évitent de produire les champs lourds (alors vides)
     def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None: ...
     def csv_all(self) -> bytes | None: ...               # liens_tous_departements.csv, None s'il n'existe pas
@@ -74,6 +83,23 @@ class FileSource:
             csv_present=csv_present,
             resume_changements=history.summary_line(history.changes(db, dept)) if cur else "",
         )
+
+    def liens(self, dept: str | None = None) -> list[dict]:
+        """Communes avec lien, calculées comme dans report.render (mêmes coverage.build et results.collect)."""
+        disponibles = self.depts()
+        concernes = disponibles if dept is None else ([dept] if dept in disponibles else [])
+        rows: list[dict] = []
+        for d in concernes:
+            paths = DeptPaths(self.root, d)
+            states = coverage.build(paths) if paths.inventory_communes.exists() else []
+            names = {s["code_insee"]: s["nom_commune"] for s in states}
+            try:
+                trouvees = results.collect(paths)
+            except FileNotFoundError:
+                continue
+            rows.extend({"dept": d, "code_insee": r["code_insee"], "nom_commune": names.get(r["code_insee"], ""),
+                         "url_page": r["url_page"]} for r in trouvees)
+        return trier_liens(rows)
 
     def csv_all(self) -> bytes | None:
         f = self.root / "resultats" / CSV_TOUS
