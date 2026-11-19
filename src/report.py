@@ -43,15 +43,20 @@ def footer() -> str:
             "Vos Questions dans les sites de mairies.</p></div></div></div></footer>")
 
 
+SUFFIXE_TITRE = "Mairie Link Monitor"
+
+
 def page(title: str, body: str, refresh: int | None = None, static_prefix: str = STATIC_PREFIX_WEB) -> str:
+    """Page complète. `refresh` est conservé pour compatibilité mais ne produit plus de meta refresh (RGAA 13.1) :
+    l'actualisation automatique est un contrôle utilisateur placé dans le corps de l'accueil (webapp.home)."""
     sp = escape(static_prefix)
-    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    titre = escape(title if title.endswith(SUFFIXE_TITRE) else f"{title} – {SUFFIXE_TITRE}")
     # Lien d'accueil seulement sur le web : un fichier écrit sur disque n'a pas de racine « / ».
     accueil = "/" if static_prefix.startswith("/") else None
     return (
         '<!doctype html><html lang="fr" data-fr-scheme="system"><head>'
         '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"{meta}<title>{escape(title)}</title>"
+        f"<title>{titre}</title>"
         '<meta name="theme-color" content="#000091">'
         f'<link rel="apple-touch-icon" href="{sp}/favicon/apple-touch-icon.png">'
         f'<link rel="icon" href="{sp}/favicon/favicon.svg" type="image/svg+xml">'
@@ -73,20 +78,22 @@ def page(title: str, body: str, refresh: int | None = None, static_prefix: str =
 
 
 def link(url: str) -> str:
-    return f'<a href="{escape(url)}" rel="noopener noreferrer" target="_blank">{escape(url)}</a>' if url else ""
+    return (f'<a href="{escape(url)}" rel="noopener noreferrer" target="_blank">{escape(url)}'
+            '<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>') if url else ""
 
 
 def source(url: str) -> str:
     return "PanneauPocket" if (urlsplit(url).hostname or "") == cl.PP_HOST else "site de la mairie"
 
 
-def table(headers: list[str], rows: list[list[str]], empty: str) -> str:
+def table(headers: list[str], rows: list[list[str]], empty: str, caption: str = "") -> str:
     if not rows:
         return f'<p class="fr-hint-text">{escape(empty)}</p>'
+    cap = f"<caption>{escape(caption)}</caption>" if caption else ""
     head = "".join(f'<th scope="col">{escape(h)}</th>' for h in headers)
     body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
     return ('<div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container">'
-            f'<div class="fr-table__content"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+            f'<div class="fr-table__content"><table>{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
             "</div></div></div></div>")
 
 
@@ -142,24 +149,24 @@ def render(paths: DeptPaths, db: Path, static_prefix: str = STATIC_PREFIX_WEB) -
             else:
                 body.append(f"<h3>{titre}</h3>")
             if rows:
-                body.append(table(headers, [fmt(r) for r in rows], ""))
+                body.append(table(headers, [fmt(r) for r in rows], "", caption=title))
 
     body.append(f"<h2>Communes avec un lien ({len(links)})</h2>")
     body.append(table(["Code INSEE", "Commune", "Page", "Source"],
                       [[escape(c), escape(names.get(c, "")), link(u),
                         f'<span class="fr-badge fr-badge--info fr-badge--sm">{escape(source(u))}</span>']
                        for c, u in sorted(links.items())],
-                      "Aucun lien trouvé."))
+                      "Aucun lien trouvé.", caption="Communes avec un lien"))
 
     unread = [s for s in states if s["analysee"] == "non" or s["etat"].startswith("site lu partiellement")]
     body.append("<h2>À vérifier</h2>")
     body.append(f"<details><summary>{len(unread)} commune(s) non lue(s) ou lue(s) partiellement</summary>"
                 + table(["Code INSEE", "Commune", "État", "Détail"],
                         [[escape(s["code_insee"]), escape(s["nom_commune"]), escape(s["etat"]), escape(s["motif"])]
-                         for s in unread], "Aucune.") + "</details>")
+                         for s in unread], "Aucune.", caption="Communes non lues ou lues partiellement") + "</details>")
     body.append('<p class="fr-hint-text">« Aucun lien » n\'est certain que pour un site lu en entier (dans les limites fixées) '
                 "ou une page PanneauPocket lue. Les sites construits en JavaScript ne sont pas lus.</p>")
-    return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix)
+    return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix)  # suffixe ajouté par page()
 
 
 def write(paths: DeptPaths, db: Path) -> Path:

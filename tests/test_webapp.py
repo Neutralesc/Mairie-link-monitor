@@ -81,7 +81,8 @@ class LocalTests(WebTests):
         self.wait_log("ARGS --dept 60 01 --resume")
         status, html = self.call("/")
         self.assertIn("Analyse en cours : 60 01 (reprise)", html)
-        self.assertIn('http-equiv="refresh"', html)
+        self.assertNotIn('http-equiv="refresh"', html)                          # RGAA 13.1 : pas de rechargement imposé
+        self.assertIn('id="actualiser-auto"', html)
         self.assertEqual(self.call("/lancer", {"dept": "80"})[0], 409)          # une seule analyse à la fois
         self.assertEqual(self.call("/arreter", {})[0], 303)
         self.runner.proc.wait(5)

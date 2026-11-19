@@ -115,11 +115,19 @@ def home(root: Path, runner: Runner, message: str = "") -> str:
     if run:
         minutes = int((time.time() - runner.started) // 60)
         parts.append(f'<section class="fr-mb-4w" aria-live="polite"><h2>Analyse en cours : {escape(runner.label)}</h2>'
-                     f"<p>Démarrée il y a {minutes} min. Cette page se met à jour toute seule.</p>"
+                     f"<p>Démarrée il y a {minutes} min. Utilisez « Actualiser » pour voir l'avancement.</p>"
                      f'<pre class="mlm-journal">{escape(runner.tail())}</pre>'
                      '<form method="post" action="/arreter"><button class="fr-btn fr-btn--secondary" type="submit">'
                      "Arrêter l'analyse</button></form>"
                      '<p class="fr-hint-text">Une analyse arrêtée peut être reprise : cochez « Reprendre » au prochain lancement.</p>'
+                     '<p><a class="fr-btn fr-btn--secondary" href="/">Actualiser</a></p>'
+                     '<div class="fr-checkbox-group"><input id="actualiser-auto" type="checkbox">'
+                     '<label class="fr-label" for="actualiser-auto">Actualiser automatiquement toutes les 10 secondes</label></div>'
+                     '<script>(function(){var c=document.getElementById("actualiser-auto"),t=null;'
+                     "var k=\"mlm-actualiser\";try{c.checked=sessionStorage.getItem(k)===\"1\";}catch(e){}"
+                     "function m(){clearInterval(t);t=null;try{sessionStorage.setItem(k,c.checked?\"1\":\"0\");}catch(e){}"
+                     "if(c.checked){t=setInterval(function(){location.reload();},10000);}}"
+                     'c.addEventListener("change",m);m();})();</script>'
                      "</section>")
     else:
         parts.append('<section class="fr-mb-4w"><h2>Lancer une analyse</h2>'
@@ -145,17 +153,18 @@ def home(root: Path, runner: Runner, message: str = "") -> str:
     for d in known_depts(root):
         ch = history.changes(db, d)
         cur = ch["courant"]
-        csv_link = f'<a class="fr-link" href="/csv/{d}">CSV</a>' if DeptPaths(root, d).result_csv.exists() else ""
+        sr = f'<span class="fr-sr-only"> du département {escape(d)}</span>'
+        csv_link = f'<a class="fr-link" href="/csv/{d}">CSV{sr}</a>' if DeptPaths(root, d).result_csv.exists() else ""
         rows.append([f"<b>{escape(d)}</b>", escape(report.fr_date(cur["date"])) if cur else "—",
                      str(cur["avec_lien"]) if cur else "—",
                      escape(history.summary_line(ch)) if cur else "—",
-                     f'<a class="fr-link" href="/rapport/{d}">Compte rendu</a> {csv_link}'])
+                     f'<a class="fr-link" href="/rapport/{d}">Compte rendu{sr}</a> {csv_link}'])
     parts.append("<h2>Résultats par département</h2>")
     parts.append(report.table(["Département", "Dernier contrôle", "Communes avec lien", "Changements", "Ouvrir"], rows,
-                              "Aucun département analysé pour l'instant."))
+                              "Aucun département analysé pour l'instant.", caption="Résultats par département"))
     if (root / "resultats" / "liens_tous_departements.csv").exists():
         parts.append('<p><a class="fr-link" href="/csv/tous">Télécharger le CSV de tous les départements</a></p>')
-    return report.page("Liens Vos questions", "\n".join(parts), refresh=10 if run else None)
+    return report.page("Liens Vos questions", "\n".join(parts))
 
 
 def make_handler(root: Path, runner: Runner, password: str):
