@@ -3,6 +3,7 @@
 
   python src/ci_analyse.py run --analysis-id N --depts "60 80" [--reprise] [--root DOSSIER]
   python src/ci_analyse.py fin --analysis-id N --statut annulee|echec
+  python src/ci_analyse.py republier --depts "60 80"|tous [--root DOSSIER]   (republie sans refaire l'analyse)
 
 Variables d'environnement : DATABASE_URL (obligatoire), GITHUB_RUN_ID (run_id), MLM_CONTACT (facultatif : --contact).
 Codes retour : 0 terminee (ou rien à lancer) ; 1 échec ; 2 arguments ou configuration invalides ; 3 relance d'une
@@ -312,6 +313,31 @@ def cmd_fin(args) -> int:
         conn.close()
 
 
+def cmd_republier(args) -> int:
+    """Republie en base les résultats déjà présents sur le disque (cache restauré), sans refaire l'analyse."""
+    depts = parse_depts(args.depts)
+    if depts is None:
+        print("Département(s) invalide(s) : utilisez des codes comme 60, 01, 2A, 971, ou « tous ».",
+              file=sys.stderr, flush=True)
+        return 2
+    url = _database_url()
+    if url is None:
+        return 2
+    try:
+        with _connexion(url) as conn:
+            res = store_pg.publish(FileSource(args.root), conn, only=depts)
+    except Exception as exc:  # noqa: BLE001 - seul le type est écrit (le message peut contenir l'hôte)
+        print(f"[ci_analyse] republication en échec : {type(exc).__name__}", file=sys.stderr, flush=True)
+        return 1
+    if not res["departements"]:
+        print("[ci_analyse] aucun résultat à republier pour ces départements (cache absent ou vide) : "
+              "lancez d'abord une analyse.", file=sys.stderr, flush=True)
+        return 1
+    print(f"[ci_analyse] republié : {', '.join(res['departements'])} ; "
+          f"CSV global : {'oui' if res['csv_global'] else 'non'}", flush=True)
+    return 0
+
+
 def _entier(texte: str) -> int:
     """Numéro d'analyse ; une valeur vide (champ effacé dans l'interface GitHub) vaut 0 : lancement direct."""
     return int(texte.strip() or 0)
@@ -326,6 +352,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--reprise", action="store_true", help="ne refait que le travail manquant")
     r.add_argument("--root", type=Path, default=ROOT, help="racine du projet (défaut : dossier parent de src/)")
     r.set_defaults(func=cmd_run)
+    rp = sub.add_parser("republier", help="republie les résultats déjà présents sur le disque, sans refaire l'analyse")
+    rp.add_argument("--depts", required=True, help='codes séparés par des espaces, ex. "60 80", ou "tous"')
+    rp.add_argument("--root", type=Path, default=ROOT, help="racine du projet (défaut : dossier parent de src/)")
+    rp.set_defaults(func=cmd_republier)
     f = sub.add_parser("fin", help="marque une analyse annulée ou en échec (sans effet si déjà finale)")
     f.add_argument("--analysis-id", type=_entier, required=True)
     f.add_argument("--statut", required=True, choices=("annulee", "echec"))
