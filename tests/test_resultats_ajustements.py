@@ -17,7 +17,7 @@ class TriSansAccentsTests(unittest.TestCase):
     def test_commune_accentuee_rangee_avec_sa_lettre(self):
         noms = [l["nom_commune"] for l in publications.trier_liens(
             [ligne("Zeta"), ligne("Élancourt"), ligne("Dax"), ligne("Eu"), ligne("Étaples")])]
-        self.assertEqual(noms, ["Dax", "Élancourt", "Eu", "Étaples", "Zeta"])
+        self.assertEqual(noms, ["Dax", "Élancourt", "Étaples", "Eu", "Zeta"])
 
     def test_tri_stable_a_nom_equivalent(self):
         a, b = ligne("Été", "02"), ligne("Ete", "01")
