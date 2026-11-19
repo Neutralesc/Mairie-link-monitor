@@ -35,6 +35,7 @@ ARRET_DELAI = 10.0         # secondes entre l'arrêt demandé (SIGTERM) et SIGKI
 PAUSE_NOUVELLE_TENTATIVE = 2.0  # secondes avant la seule nouvelle tentative d'écriture du statut final
 CODE_ANNULEE = 130
 CODE_DEJA_EN_ECHEC = 3
+CODE_DEJA_ACTIVE = 4
 
 # Écrit par le gestionnaire de signal, lu par la boucle principale. Le gestionnaire ne prend aucun verrou.
 _SIGNAL = {"recu": 0}
@@ -241,6 +242,24 @@ def _executer(url: str, root: Path, analysis_id: int, depts: list[str], reprise:
     return code
 
 
+def _creer_analyse(url: str, depts: list[str], reprise: bool) -> int | None:
+    """Crée l'analyse d'un lancement direct. None si une autre analyse est déjà active (ou base inaccessible)."""
+    try:
+        conn = store_pg.connect(url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Connexion à la base impossible : {type(exc).__name__}", file=sys.stderr, flush=True)
+        return None
+    try:
+        analysis_id = store_pg.analysis_queue(conn, depts, reprise)
+    finally:
+        conn.close()
+    if analysis_id is None:
+        print("Une analyse est déjà en cours : rien à lancer.", file=sys.stderr, flush=True)
+    else:
+        print(f"Lancement direct : analyse {analysis_id} créée.", flush=True)
+    return analysis_id
+
+
 def cmd_run(args) -> int:
     depts = parse_depts(args.depts)
     if depts is None:
@@ -250,16 +269,21 @@ def cmd_run(args) -> int:
     url = _database_url()
     if url is None:
         return 2
+    analysis_id = args.analysis_id
+    if analysis_id == 0:                      # lancement direct (onglet Actions de GitHub) : l'analyse est créée ici
+        analysis_id = _creer_analyse(url, depts, args.reprise)
+        if analysis_id is None:
+            return CODE_DEJA_ACTIVE
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, _sur_signal)
     try:
-        return _executer(url, args.root, args.analysis_id, depts, args.reprise,
+        return _executer(url, args.root, analysis_id, depts, args.reprise,
                          os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("MLM_CONTACT", "").strip())
     except Exception as exc:  # noqa: BLE001 : journalisé, analyse marquée en échec, code 1
         message = f"[ci_analyse] erreur inattendue : {type(exc).__name__}"
         print(message, file=sys.stderr, flush=True)
         try:
-            _ecrire_fin(url, args.analysis_id, "echec", message + "\n")
+            _ecrire_fin(url, analysis_id, "echec", message + "\n")
         except Exception as exc2:  # noqa: BLE001
             print(f"[ci_analyse] statut non écrit : {type(exc2).__name__}", file=sys.stderr, flush=True)
         return 1
@@ -275,7 +299,11 @@ def cmd_fin(args) -> int:
         print(f"Analyse {args.analysis_id} : base inaccessible ({type(exc).__name__}).", file=sys.stderr, flush=True)
         return 1
     try:
-        if store_pg.analysis_end(conn, args.analysis_id, args.statut):
+        if args.analysis_id == 0:               # lancement direct : on retrouve l'analyse par le numéro du run GitHub
+            termine = store_pg.analysis_end_by_run(conn, os.environ.get("GITHUB_RUN_ID", ""), args.statut)
+        else:
+            termine = store_pg.analysis_end(conn, args.analysis_id, args.statut)
+        if termine:
             print(f"Analyse {args.analysis_id} : statut « {args.statut} ».", flush=True)
         else:
             print(f"Analyse {args.analysis_id} : déjà finale ou absente, inchangée.", flush=True)
@@ -284,17 +312,22 @@ def cmd_fin(args) -> int:
         conn.close()
 
 
+def _entier(texte: str) -> int:
+    """Numéro d'analyse ; une valeur vide (champ effacé dans l'interface GitHub) vaut 0 : lancement direct."""
+    return int(texte.strip() or 0)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Analyse GitHub Actions : crawler, journal, publication.")
     sub = ap.add_subparsers(dest="commande", required=True)
     r = sub.add_parser("run", help="exécute une analyse et publie son résultat")
-    r.add_argument("--analysis-id", type=int, required=True)
+    r.add_argument("--analysis-id", type=_entier, required=True)
     r.add_argument("--depts", required=True, help='codes séparés par des espaces, ex. "60 80", ou "tous"')
     r.add_argument("--reprise", action="store_true", help="ne refait que le travail manquant")
     r.add_argument("--root", type=Path, default=ROOT, help="racine du projet (défaut : dossier parent de src/)")
     r.set_defaults(func=cmd_run)
     f = sub.add_parser("fin", help="marque une analyse annulée ou en échec (sans effet si déjà finale)")
-    f.add_argument("--analysis-id", type=int, required=True)
+    f.add_argument("--analysis-id", type=_entier, required=True)
     f.add_argument("--statut", required=True, choices=("annulee", "echec"))
     f.set_defaults(func=cmd_fin)
     args = ap.parse_args(argv)

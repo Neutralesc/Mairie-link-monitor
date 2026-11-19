@@ -269,6 +269,18 @@ def analysis_end(conn, analysis_id: int, statut: str) -> bool:
     return cur.rowcount == 1
 
 
+def analysis_end_by_run(conn, run_id: str, statut: str) -> bool:
+    """Comme analysis_end, pour l'analyse active rattachée à ce run GitHub (lancement direct sans numéro connu)."""
+    if not run_id:
+        return False
+    cur = conn.execute(
+        "UPDATE analyses SET statut = %s, fin = now() WHERE run_id = %s AND statut IN ('file','en_cours')",
+        (statut, run_id),
+    )
+    conn.commit()
+    return cur.rowcount >= 1
+
+
 def analysis_get(conn, analysis_id: int) -> dict | None:
     cur = conn.execute("SELECT * FROM analyses WHERE id = %s", (analysis_id,))
     row = cur.fetchone()
