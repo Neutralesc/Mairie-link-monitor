@@ -36,7 +36,7 @@ def menu_principal(active: str) -> tuple[str, str]:
                     % (chemin, courante if cle == active else "", libelle)
                     for cle, libelle, chemin in ENTREES_MENU)
     bouton = ('<div class="fr-header__navbar"><button class="fr-btn--menu fr-btn" data-fr-opened="false" '
-              'aria-controls="modal-menu" aria-haspopup="menu" id="button-open-menu" title="Menu">Menu</button></div>')
+              'aria-controls="modal-menu" id="button-open-menu" title="Menu">Menu</button></div>')
     panneau = ('<div class="fr-header__menu fr-modal" id="modal-menu" aria-labelledby="button-open-menu"><div class="fr-container">'
                '<button class="fr-btn--close fr-btn" aria-controls="modal-menu" title="Fermer">Fermer</button>'
                '<div class="fr-header__menu-links"></div>'

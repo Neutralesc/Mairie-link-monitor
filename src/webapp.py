@@ -219,9 +219,9 @@ def pagination(dept: str, q: str, courante: int, total: int) -> str:
         if p in (1, total) or abs(p - courante) <= 2:
             trou = False
             if p == courante:
-                items.append(lien(p, str(p), attributs=' aria-current="page"'))
+                items.append(lien(p, f'<span class="fr-sr-only">Page </span>{p}', attributs=' aria-current="page"'))
             else:
-                items.append(lien(p, str(p), attributs=f' title="Page {p}"'))
+                items.append(lien(p, f'<span class="fr-sr-only">Page </span>{p}'))
         elif not trou:
             trou = True
             items.append("<li>…</li>")
@@ -272,13 +272,16 @@ def resultats(source: PublicationSource, params: dict[str, list[str]]) -> str:
     parts = ["<h1>Résultats</h1>",
              f'<p class="fr-text--lead">{LIBELLE_RESULTATS}</p>',
              formulaire,
-             f'<p><strong>{n} commune{"s" if n > 1 else ""} avec lien</strong></p>']
-    if not base:
-        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w"><p>Aucun résultat publié pour le moment : '
-                     "lancez une analyse depuis l'onglet Analyses.</p></div>")
+             f'<p role="status"><strong>{n} commune{"s" if n > 1 else ""} avec lien</strong></p>']
+    if not base and dept:
+        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucune commune avec lien '
+                     f"publiée pour le département {escape(dept)}.</p></div>")
+    elif not base:
+        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucun résultat publié pour le '
+                     "moment : lancez une analyse depuis le menu Analyses.</p></div>")
     elif not lignes:
-        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w"><p>Aucune commune ne correspond à votre recherche.</p>'
-                     "</div>")
+        parts.append('<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucune commune ne correspond à '
+                     "votre recherche.</p></div>")
     else:
         rows = [[escape(ligne["dept"]), escape(ligne["nom_commune"]), escape(ligne["code_insee"]),
                  report.link(ligne["url_page"])] for ligne in tranche]

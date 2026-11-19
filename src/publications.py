@@ -7,6 +7,7 @@ sans toucher aux pages. Bibliothèque standard uniquement.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -37,9 +38,15 @@ class Publication:
     resume_changements: str   # ligne « Changements » de l'accueil ('' s'il n'y a aucun contrôle)
 
 
+def _sans_accents(texte: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", texte) if unicodedata.category(c) != "Mn").casefold()
+
+
 def trier_liens(rows: list[dict]) -> list[dict]:
-    """Tri commun aux implémentations : dept, puis nom_commune (insensible à la casse), puis code_insee."""
-    return sorted(rows, key=lambda r: (r["dept"], r["nom_commune"].casefold(), r["code_insee"]))
+    """Tri commun aux implémentations : dept, puis nom_commune (insensible à la casse ET aux accents : « Élancourt »
+    se range avec les E), puis code_insee."""
+    return sorted(rows, key=lambda r: (r["dept"], _sans_accents(r["nom_commune"]), r["nom_commune"].casefold(),
+                                       r["code_insee"]))
 
 
 class PublicationSource(Protocol):
