@@ -480,7 +480,9 @@ async def fetch(*args, **kwargs) -> Fetched:
 
 
 async def load_robots(client, robots_origin_url: str, site_host: str, throttle: Throttle, timeout: float | None = None):
-    """Retourne (parser|None, état, nature de l'échec, statut HTTP). état : ok | absent | indisponible."""
+    """Retourne (parser|None, état, nature de l'échec, statut HTTP). état : ok | absent | indisponible.
+    RFC 9309 : 2xx = règles appliquées ; 4xx (401/403 compris) = absent, pas de restriction ;
+    redirections sans issue et 5xx / erreur réseau = indisponible."""
     p = urlsplit(robots_origin_url)
     res = await fetch(client, f"{p.scheme}://{p.netloc}/robots.txt", site_host, throttle, html_only=False, timeout=timeout,
                       follow_external=True)               # RFC 9309 : au moins 5 redirections, même vers un autre domaine
@@ -488,12 +490,8 @@ async def load_robots(client, robots_origin_url: str, site_host: str, throttle: 
         rp = RobotFileParser()
         rp.parse(res.html.splitlines())
         return rp, "ok", "", res.status
-    if res.status in (401, 403):
-        rp = RobotFileParser()
-        rp.parse(["User-agent: *", "Disallow: /"])
-        return rp, "ok", "", res.status
     if res.status is not None and 400 <= res.status < 500:
-        return None, "absent", "", res.status          # pas de robots.txt : exploration autorisée
+        return None, "absent", "", res.status          # RFC 9309 §2.3.1.3 : 4xx (401/403 compris) = pas de restriction
     if res.kind == "trop_de_redirections" or (res.status is not None and 300 <= res.status < 400):
         return None, "absent", "", res.status          # RFC 9309 : redirection sans issue = robots.txt indisponible (4xx)
     return None, "indisponible", res.kind, res.status  # 5xx / erreur réseau : prudence
@@ -624,6 +622,10 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                         row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {rkind}",
                                    erreur=first_error[:200], pages_en_erreur=errors)
                     return
+                # Robots indisponible sur une autre origine : page non lue, comptée comme erreur du site.
+                if url not in probes:                     # une sonde n'est pas une erreur du site
+                    first_error = first_error or f"{url} -> robots {rkind} {rstatus or ''}".strip()
+                    errors += 1
                 continue
             if rp is not None and not rp.can_fetch(UA_TOKEN, url):
                 if url in probes:
@@ -685,12 +687,11 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                         probe = normalize_internal(origin + path)
                         probes.add(probe)
                         push(probe, 1)
-            elif res.kind == "non_html":
-                if url in probes:
-                    row["pages_visitees"] -= 1
-            elif url in probes:                                        # sonde sans réponse (404…) : sans conséquence
+            elif url in probes:                                        # sonde sans réponse ou non HTML : sans conséquence
                 row["pages_visitees"] -= 1
-            else:
+            elif res.kind == "non_html" and depth > 0:                 # page non HTML hors accueil : ignorée
+                pass
+            else:                                                      # erreur d'accès (accueil : non HTML compris)
                 first_error = first_error or f"{url} -> {res.kind} {res.status or ''} {res.error}".strip()
                 if depth == 0:
                     last_kind = res.kind
@@ -1053,7 +1054,7 @@ def summarize(site_rows: list[dict], link_rows: list[dict], params: dict, checke
             "Les redirections ou raccourcisseurs menant au site cible ne sont pas suivis.",
             "Sites à certificat invalide explorés sans vérification du certificat (ssl_invalide=1) : contenu non authentifié.",
             "Sites « devine_a_verifier » : trouvés par noms de domaine usuels, non référencés par la DILA.",
-            "robots.txt est respecté ; un robots.txt en erreur HTTP (5xx) empêche l'exploration du site."]}
+            "robots.txt est respecté ; un robots.txt en erreur HTTP (5xx) empêche l'exploration du site ; un robots.txt en 4xx (y compris 401/403) vaut « pas de restriction » (RFC 9309)."]}
 
 
 def _prepare(paths: DeptPaths, args) -> dict | None:

@@ -188,7 +188,7 @@ class CrawlTests(unittest.TestCase):
         (res,) = crawl(robots(status=404))
         self.assertEqual(res.row["statut_crawl"], "lien_trouve")         # pas de robots.txt : exploration autorisée
         (res,) = crawl(robots(status=403))
-        self.assertEqual(res.row["statut_crawl"], "robots_interdit")     # 403 : tout interdit
+        self.assertEqual(res.row["statut_crawl"], "lien_trouve")         # 4xx dont 401/403 : pas de restriction (RFC 9309)
         (res,) = crawl(robots("User-agent: *\nDisallow: /prive\n"), )
         self.assertEqual(res.row["statut_crawl"], "lien_trouve")
 
