@@ -1,6 +1,7 @@
 name: analyse
 
-# Déclenché par l'interface (Vercel) après l'insertion d'une ligne « file » dans la table analyses.
+# Déclenché par l'interface (Vercel) après l'insertion d'une ligne « file » dans la table analyses, ou directement
+# depuis l'onglet Actions de GitHub (analysis_id = 0 : l'analyse est alors créée par ci_analyse.py).
 # Sécurité : les inputs ne sont jamais interpolés dans un bloc run ; ils passent par env (valeurs entre guillemets).
 
 on:
@@ -15,9 +16,10 @@ on:
         type: boolean
         default: false
       analysis_id:
-        description: "Identifiant de la ligne analyses"
+        description: "Identifiant de la ligne analyses (laisser 0 pour un lancement direct : l'analyse est créée ici)"
         type: string
-        required: true
+        required: false
+        default: "0"
 
 permissions:
   contents: read
