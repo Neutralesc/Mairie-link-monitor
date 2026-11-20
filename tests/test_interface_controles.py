@@ -23,9 +23,9 @@ MDP = "mdp-controle-42"
 CAUSE = sorted(synthese.CAUSES)[0]
 HOSTILE = '"><script>alert(1)</script>'
 HOSTILE_ECHAPPE = "&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"
-NAVIGATION = {"/": "Accueil", "/analyse": "Analyse", "/suivi": "Suivi", "/rapports": "Rapports",
-              "/resultats": "Résultats", "/campagnes": "Historique"}
-PAGES = ["/", "/analyse", "/suivi", "/api/etat", "/rapports", "/rapports/60", "/rapports/60/export.html",
+NAVIGATION = {"/": "Accueil", "/tableau-de-bord": "Tableau de bord", "/analyse": "Analyse", "/suivi": "Suivi",
+              "/rapports": "Rapports", "/resultats": "Résultats", "/campagnes": "Historique"}
+PAGES = ["/", "/tableau-de-bord", "/analyse", "/suivi", "/api/etat", "/rapports", "/rapports/60", "/rapports/60/export.html",
          "/rapports/60/communes.csv", "/campagnes", "/campagnes/7", "/resultats", "/resultats?dept=60&q=chat",
          "/resultats?page=9", "/csv/60", "/csv/tous"]
 
@@ -198,14 +198,15 @@ class AuthentificationTests(ServeurInterface):
 
 class StructureTests(ServeurInterface):
     def test_un_seul_h1_par_page(self):
-        for p in ["/", "/analyse", "/suivi", "/rapports", "/rapports/60", "/resultats", "/campagnes", "/campagnes/7"]:
+        for p in ["/", "/tableau-de-bord", "/analyse", "/suivi", "/rapports", "/rapports/60", "/resultats", "/campagnes",
+                  "/campagnes/7"]:
             with self.subTest(page=p):
                 self.assertEqual(len(re.findall(r"<h1[ >]", self.texte(p))), 1)
 
-    def test_menu_six_entrees_et_entree_active(self):
-        for p, actif in [("/", "/"), ("/analyse", "/analyse"), ("/suivi", "/suivi"), ("/rapports", "/rapports"),
-                         ("/rapports/60", "/rapports"), ("/resultats", "/resultats"), ("/campagnes", "/campagnes"),
-                         ("/campagnes/7", "/campagnes")]:
+    def test_menu_sept_entrees_et_entree_active(self):
+        for p, actif in [("/", "/"), ("/tableau-de-bord", "/tableau-de-bord"), ("/analyse", "/analyse"),
+                         ("/suivi", "/suivi"), ("/rapports", "/rapports"), ("/rapports/60", "/rapports"),
+                         ("/resultats", "/resultats"), ("/campagnes", "/campagnes"), ("/campagnes/7", "/campagnes")]:
             with self.subTest(page=p):
                 t = self.texte(p)
                 liens = re.findall(r'<a class="fr-nav__link" href="([^"]+)" target="_self"', t)
@@ -216,7 +217,7 @@ class StructureTests(ServeurInterface):
     def test_page_d_erreur_garde_le_menu(self):
         t = self.texte("/campagnes/999")
         self.assertIn("Page introuvable", t)
-        self.assertEqual(len(re.findall(r'<a class="fr-nav__link" href="[^"]+" target="_self"', t)), 6)
+        self.assertEqual(len(re.findall(r'<a class="fr-nav__link" href="[^"]+" target="_self"', t)), len(NAVIGATION))
 
     def test_pied_de_page_et_titre(self):
         t = self.texte("/")

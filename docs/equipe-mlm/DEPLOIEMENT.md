@@ -143,13 +143,43 @@ fonctionne :
   lecture après le contrôle. Les pages publiques en local écrivent donc dans cette base.
 
 Accès à l'administration : la page publique propose un lien « Espace réservé » vers `/analyse`, qui demande le mot de
-passe. Le navigateur qui a fourni le bon mot de passe voit ensuite le menu complet sur la racine et sur les pages
-publiques. Un identifiant invalide sur une page publique est simplement traité comme un visiteur.
+passe. Le navigateur qui a fourni le bon mot de passe voit ensuite, sur la racine et sur les pages publiques, les mêmes
+résultats que les visiteurs, avec le menu complet (« Tableau de bord », « Analyse », « Suivi », « Rapports »,
+« Résultats », « Historique »). Un identifiant invalide sur une page publique est simplement traité comme un visiteur.
+
+Le tableau de bord d'administration (dernière analyse, chiffres, bouton « Lancer une analyse ») n'est plus à la racine
+quand la lecture publique est ouverte : il est sur `/tableau-de-bord`, toujours protégé par le mot de passe. Il reste
+accessible par l'entrée « Tableau de bord » du menu. Sans `MLM_LECTURE_PUBLIQUE`, la racine reste le tableau de bord
+protégé, comme avant. Aucun bouton de lancement n'apparaît dans la vue résultats, même pour l'administrateur.
 
 Les pages publiques sont marquées `noindex`, et la réponse varie selon l'identifiant (`Vary: Authorization`, sans cache).
 
 Pour couper : supprimez `MLM_LECTURE_PUBLIQUE` (ou donnez-lui une valeur autre que `1`, `true` ou `oui`), puis relancez
 un déploiement. La racine redemande alors le mot de passe, comme avant.
+
+## Adresse principale et ancienne adresse (redirection)
+
+Le même déploiement répond sur deux noms d'hôte : l'adresse principale `mairie-link-monitor.vercel.app`, et
+`mairie-link-monitor-neutralex.vercel.app`, alias automatique de Vercel qui ne peut pas être supprimé. Pour que toute
+visite passe par l'adresse principale, renseignez dans Vercel (*Settings*, *Environment Variables*, environnement
+*Production*) :
+
+| Nom | Valeur | Obligatoire |
+|---|---|---|
+| `MLM_HOTE_PRINCIPAL` | `mairie-link-monitor.vercel.app` (nom d'hôte seul, sans `https://` ni chemin) | non |
+| `MLM_HOTES_REDIRIGES` | `mairie-link-monitor-neutralex.vercel.app` (plusieurs noms séparés par des virgules) | non |
+
+Puis relancez un déploiement (*Redeploy*) : les variables ne sont lues qu'au démarrage.
+
+Effet : une requête adressée à un nom listé dans `MLM_HOTES_REDIRIGES` reçoit une réponse `308 Permanent Redirect` vers
+`https://mairie-link-monitor.vercel.app`, avec le même chemin et la même requête (la méthode est conservée). La
+redirection a lieu avant toute demande de mot de passe. Les adresses d'aperçu (déploiements de branche) et l'adresse
+principale ne sont pas touchées. Les noms sont normalisés (minuscules, sans port) ; une valeur invalide est ignorée et
+un avertissement est journalisé, sans interrompre le site. Si une seule des deux variables est renseignée, rien n'est
+redirigé.
+
+Pour couper la redirection : supprimez `MLM_HOTES_REDIRIGES` (ou laissez-la vide), puis relancez un déploiement. Les deux
+noms répondront alors à l'identique.
 
 ## Durcissement recommandé
 
