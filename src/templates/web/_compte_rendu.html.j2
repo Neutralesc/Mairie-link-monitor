@@ -1,5 +1,6 @@
 {# Compte rendu départemental lisible : partagé par la page web (accordéons DSFR) et l'export autonome (details/summary, sans JS).
-   Consultation seule : aucun formulaire. Variables : synth, vue (webapp.vue_compte_rendu), autonome, filtre, url_html, url_csv. #}
+   Consultation seule : aucun formulaire. Variables : synth, vue (webapp.vue_compte_rendu), autonome, filtre, url_html, url_csv.
+   lecture=True (espace consultation publique) : pas de détails techniques ni de liens écartés, rel nofollow. #}
 {% set d = synth.departement %}
 {% set camp = synth.campagne or {} %}
 {% macro section(id, titre, ouvert=False) %}
@@ -11,6 +12,7 @@
 {% endif %}
 {% endmacro %}
 {% macro techniques(id, communes) %}
+{% if not lecture %}{# consultation : pas de valeurs brutes ni de messages d'erreur internes #}
 {% call section(id, 'Détails techniques') %}
 {% if communes %}
 <div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
@@ -22,6 +24,7 @@
 </tr>{% endfor %}{% endfor %}</tbody></table></div></div></div></div>
 {% else %}<p>Rien à signaler.</p>{% endif %}
 {% endcall %}
+{% endif %}
 {% endmacro %}
 {% macro site(s) %}{{ s.url_depart or s.domaine }}{% if s.tls_non_verifie %} <span class="fr-tag fr-tag--sm">certificat non vérifié</span>{% endif %}{{ tags_source(s.source) }}{% endmacro %}
 {% macro tags_source(source) %}{% if source == 'decouverte' %} <span class="fr-tag fr-tag--sm">Site trouvé automatiquement — à vérifier</span>{% elif source == 'correction' %} <span class="fr-tag fr-tag--sm">Adresse corrigée</span>{% endif %}{% endmacro %}
@@ -48,6 +51,7 @@
   {% if url_csv %}<li><a class="fr-btn fr-btn--secondary" href="{{ url_csv }}">Télécharger (CSV)</a></li>{% endif %}
 </ul>
 {% endif %}
+{% if lecture and url_csv %}<p class="fr-mb-3w"><a class="fr-btn fr-btn--secondary" href="{{ url_csv }}">Télécharger la liste des communes (CSV)</a></p>{% endif %}
 {% if autonome %}<style>summary{cursor:pointer}</style>{% endif %}
 
 <div class="fr-callout fr-mb-3w"><p class="fr-callout__text">Ce compte rendu décrit uniquement ce qui a été observé pendant l'analyse. Il ne garantit pas l'exhaustivité : un site lu partiellement ou inaccessible ne permet pas de conclure à l'absence de lien.</p></div>
@@ -58,13 +62,13 @@
 <table><caption>Liens vers Vos questions trouvés sur les sites des communes</caption>
 <thead><tr><th scope="col">Commune</th><th scope="col">Page où le lien apparaît</th><th scope="col">Texte du lien</th><th scope="col">Vérification</th></tr></thead>
 <tbody>{% for l in vue.liens %}<tr><th scope="row">{{ l.commune }}{{ tags_source('decouverte' if l.site_a_verifier else None) }}</th>
-  <td>{% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}</td>
+  <td>{% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer{{ ' nofollow' if lecture else '' }}" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}</td>
   <td>{{ l.texte }}</td>
   <td>{{ badge_verification(l.verification) }}{% if l.remarque %}<p class="fr-text--xs fr-mb-0">{{ l.remarque }}</p>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div></div></div>
 {% else %}<p>Aucune commune avec un lien confirmé.</p>{% endif %}
-{% if vue.ecartes %}
+{% if vue.ecartes and not lecture %}
 {% call section('sec-ecartes', 'Liens écartés après vérification (' ~ vue.ecartes|length ~ ')') %}
-<ul>{% for l in vue.ecartes %}<li><strong>{{ l.commune }}</strong> : {% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}
+<ul>{% for l in vue.ecartes %}<li><strong>{{ l.commune }}</strong> : {% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer{{ ' nofollow' if lecture else '' }}" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}
   {{ badge_verification('faux') }}{% if l.remarque %}<p class="fr-text--xs fr-mb-0">{{ l.remarque }}</p>{% endif %}</li>{% endfor %}</ul>
 {% endcall %}
 {% endif %}
@@ -137,7 +141,7 @@
       <td>{{ c.code_insee }}</td>
       <td><p class="fr-badge fr-badge--sm{% if modif %} fr-badge--{{ modif }}{% endif %} fr-badge--no-icon fr-mb-0">{{ libelle }}</p></td>
       <td>{% if c.liens_confirmes %}<ul class="fr-raw-list">{% for l in c.liens_confirmes %}<li>
-        {% if l.url_cible|est_http %}<a href="{{ l.url_cible }}" rel="noopener noreferrer" target="_blank">{{ l.texte or l.url_cible }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.texte or l.url_cible }}{% endif %}</li>
+        {% if l.url_cible|est_http %}<a href="{{ l.url_cible }}" rel="noopener noreferrer{{ ' nofollow' if lecture else '' }}" target="_blank">{{ l.texte or l.url_cible }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.texte or l.url_cible }}{% endif %}</li>
       {% endfor %}</ul>{% else %}-{% endif %}
         {% if c.nb_liens_incertains %}<p class="fr-text--xs fr-mb-0">{{ c.nb_liens_incertains }} lien(s) incertain(s)</p>{% endif %}</td>
       <td>{{ c.detail or '' }}</td>

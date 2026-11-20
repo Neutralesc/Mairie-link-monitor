@@ -1,0 +1,45 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}Résultats publiés{% endblock %}
+{% block contenu %}
+<h1>Résultats publiés</h1>
+<p class="fr-text--lead">Liens vers les pages « Vos questions » repérés sur les sites des communes, département par département.</p>
+
+<form method="get" action="/" role="search" class="fr-mb-4w">
+  <div class="fr-input-group">
+    <label class="fr-label" for="q">Rechercher un département, par code ou par nom</label>
+    <input class="fr-input" id="q" name="q" type="search" value="{{ q }}" maxlength="80">
+  </div>
+  <button class="fr-btn" type="submit">Rechercher</button>
+  {% if q %}<a class="fr-link fr-ml-2w" href="/">Afficher tous les départements</a>{% endif %}
+</form>
+
+{% if not total %}
+<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucun résultat publié pour le moment.</p></div>
+{% elif not resumes %}
+<p role="status">Aucun département ne correspond à cette recherche.</p>
+{% else %}
+<h2 class="fr-h4">Départements publiés</h2>
+<p role="status" class="fr-mb-2w">{{ resumes|length }} département{{ 's' if resumes|length > 1 }} affiché{{ 's' if resumes|length > 1 }} sur {{ total }}.</p>
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table>
+  <caption>Dernière publication de chaque département, avec le nombre de communes par résultat</caption>
+  <thead><tr>
+    <th scope="col">Département</th><th scope="col">Dernière publication</th><th scope="col">Communes</th>
+    <th scope="col">Avec lien</th><th scope="col">À vérifier</th><th scope="col">Sans lien</th>
+    <th scope="col">Non analysables</th><th scope="col">Consulter</th>
+  </tr></thead>
+  <tbody>{% for r in resumes %}<tr>
+    <th scope="row">{{ r.code }} {{ r.nom }}</th>
+    <td>{{ r.date|date or 'Non renseignée' }}{% if r.statut_campagne == 'interrompue' %}<br><span class="fr-badge fr-badge--sm fr-badge--warning fr-badge--no-icon">Résultats partiels</span>{% endif %}</td>
+    <td>{{ r.nb_communes }}</td>
+    <td>{{ r.nb_communes_avec_lien }}</td>
+    <td>{{ r.nb_communes_a_verifier }}</td>
+    <td>{{ r.nb_communes_sans_lien }}</td>
+    <td>{{ r.nb_communes_non_analysables }}</td>
+    <td><a class="fr-link" href="/departement/{{ r.code }}">Consulter<span class="fr-sr-only"> {{ r.nom }}</span></a>
+      · <a class="fr-link" href="/departement/{{ r.code }}.csv">CSV<span class="fr-sr-only"> de {{ r.nom }}</span></a></td>
+  </tr>{% endfor %}</tbody>
+</table>
+</div></div></div></div>
+{% endif %}
+{% endblock %}

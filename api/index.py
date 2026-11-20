@@ -8,6 +8,8 @@ Les ressources DSFR sont servies par Vercel depuis public/ ; le crawl n'a pas li
 Configuration (variables d'environnement, jamais de valeur dans les pages ni dans les journaux) :
   obligatoires : DATABASE_URL, MLM_PASSWORD, MLM_GH_TOKEN, MLM_GH_REPO (« propriétaire/dépôt »)
   facultatives : MLM_GH_REF (défaut « main »), MLM_GH_WORKFLOW (défaut « analyse.yml »)
+  facultative : MLM_LECTURE_PUBLIQUE (1, true ou oui) : la racine et quelques pages de lecture deviennent publiques
+                (voir webapp.route_publique) ; l'administration reste derrière le mot de passe
 Si une variable obligatoire manque (ou si la configuration est invalide), toute requête reçoit 503 avec la liste des
 noms des variables manquantes : l'interface n'est jamais servie sans mot de passe.
 """
@@ -34,6 +36,7 @@ from publications import SourceIndisponible  # noqa: E402
 
 log = logging.getLogger("api")
 OBLIGATOIRES = ("DATABASE_URL", "MLM_PASSWORD", "MLM_GH_TOKEN", "MLM_GH_REPO")
+VALEURS_LECTURE_PUBLIQUE = ("1", "true", "oui")  # MLM_LECTURE_PUBLIQUE : toute autre valeur, ou absence, = désactivée
 
 
 def _env(nom: str, defaut: str = "") -> str:
@@ -183,7 +186,8 @@ def _construire():
                                store=_StoreAvecSchema(schema))
     except (RuntimeError, ValueError) as exc:  # messages sans secret (psycopg absent, dépôt invalide…)
         return _handler_indisponible("Configuration invalide :", [str(exc)])
-    return webapp.make_handler(ROOT, runner, _env("MLM_PASSWORD"), source)
+    lecture = _env("MLM_LECTURE_PUBLIQUE").strip().lower() in VALEURS_LECTURE_PUBLIQUE
+    return webapp.make_handler(ROOT, runner, _env("MLM_PASSWORD"), source, lecture_publique=lecture)
 
 
 handler = _construire()

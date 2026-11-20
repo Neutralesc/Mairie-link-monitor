@@ -1,0 +1,8 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}{{ titre }}{% endblock %}
+{% block contenu %}
+<h1>{{ titre }}</h1>
+<p class="fr-text--sm">Erreur {{ code }}</p>
+<p>{{ message }}</p>
+<a class="fr-btn" href="/">Retour à la liste des départements</a>
+{% endblock %}

@@ -1,0 +1,7 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}{{ synth.departement.nom }} ({{ synth.departement.code }}){% endblock %}
+{% block date_publication %}Date de la dernière publication de ce département : {{ (synth.campagne.fin or synth.campagne.debut or 'non renseignée')|date }}.{% endblock %}
+{% block contenu %}
+<p><a class="fr-link" href="/">Retour à la liste des départements</a></p>
+{% include 'web/_compte_rendu.html.j2' %}
+{% endblock %}
