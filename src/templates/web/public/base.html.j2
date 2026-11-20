@@ -41,7 +41,7 @@
           {# Pages assainies (sans_exploitation) : aucun lien d'exploitation, même pour l'administrateur #}
           {% if admin %}
             {% set entrees = [('accueil','/','Accueil'),('rapports','/rapports','Rapports'),('resultats','/resultats','Résultats'),('campagnes','/campagnes','Historique'),('apropos','/a-propos','À propos')] %}
-            {% if not sans_exploitation %}{% set entrees = entrees + [('tableau-de-bord','/tableau-de-bord','Tableau de bord'),('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi')] %}{% endif %}
+            {% if not sans_exploitation %}{% set entrees = entrees + [('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi')] %}{% endif %}
             {% set entrees = entrees + [('admin-campagnes','/admin/campagnes','Campagnes (administration)')] %}
           {% else %}
             {% set entrees = [('accueil','/','Résultats'),('rapports','/rapports','Rapports'),('campagnes','/campagnes','Historique'),('apropos','/a-propos','À propos')] %}

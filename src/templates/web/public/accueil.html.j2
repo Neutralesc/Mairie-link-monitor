@@ -10,6 +10,28 @@
 {%- endmacro %}
 <h1>Résultats publiés</h1>
 <p class="fr-text--lead">Liens vers les pages « Vos questions » repérés sur les sites des communes, département par département.</p>
+{% if alerte %}<div class="fr-alert fr-alert--warning fr-mb-4w" role="alert"><p>{{ alerte }}</p></div>{% endif %}
+
+<h2 class="fr-h4" id="chiffres-cles">Chiffres clés</h2>
+<div class="fr-grid-row fr-grid-row--gutters fr-mb-4w">
+  {% for valeur, nom in chiffres %}
+  <div class="fr-col-12 fr-col-sm-6 fr-col-md-4"><div class="fr-card fr-p-2w">
+    <p class="fr-h2 fr-mb-1w">{{ valeur }}</p><p class="fr-mb-0">{{ nom }}</p>
+  </div></div>
+  {% endfor %}
+</div>
+
+<h2 class="fr-h4" id="derniere-analyse">Dernière analyse</h2>
+{% if analyse_en_cours %}<p class="fr-mb-2w" role="status">Une analyse est en cours.</p>{% endif %}
+{% if derniere_analyse %}
+{% set lib, modif = STATUTS_ANALYSE.get(derniere_analyse.statut, (derniere_analyse.statut, 'info')) %}
+<p>Analyse {% if derniere_analyse.statut == 'terminee' %}<a class="fr-link" href="/campagnes/{{ derniere_analyse.id }}">n° {{ derniere_analyse.id }}</a>{% else %}n° {{ derniere_analyse.id }}{% endif %}, commencée le {{ derniere_analyse.debut|date }} :
+  <span class="fr-badge fr-badge--{{ modif }}">{{ lib }}</span></p>
+{% else %}<p>Aucune analyse pour le moment.</p>{% endif %}
+
+<div class="fr-callout fr-mb-4w"><h2 class="fr-callout__title">Rapports</h2>
+  <p class="fr-callout__text">Consultez le résultat de la dernière analyse de chaque département.</p>
+  <a class="fr-btn" href="/rapports">Voir les rapports</a></div>
 
 <form method="get" action="/" role="search" class="fr-mb-4w">
   <div class="fr-input-group">
@@ -21,8 +43,7 @@
 </form>
 
 <h2 class="fr-h4" id="departements-publies">Départements publiés</h2>
-<div class="fr-alert fr-alert--info fr-alert--sm fr-mb-2w" role="status"><p>{% if not total %}Aucun département publié pour le moment.{% else %}{{ resumes|length }} département{{ 's' if resumes|length > 1 }} affiché{{ 's' if resumes|length > 1 }} sur {{ total }} publié{{ 's' if total > 1 }}.{% endif %}
-  Synthèse de toutes les publications : {{ totaux.nb_communes }} commune{{ 's' if totaux.nb_communes != 1 }}, {{ totaux.nb_communes_avec_lien }} avec lien, {{ totaux.nb_communes_a_verifier }} à vérifier, {{ totaux.nb_communes_sans_lien }} sans lien, {{ totaux.nb_communes_non_analysables }} non analysable{{ 's' if totaux.nb_communes_non_analysables != 1 }}.</p></div>
+<p class="fr-alert fr-alert--info fr-alert--sm fr-mb-2w" role="status">{% if not total %}Aucun département publié pour le moment.{% elif q %}{{ resumes|length }} département{{ 's' if resumes|length > 1 }} correspond{{ 'ent' if resumes|length > 1 }} à la recherche.{% else %}Tous les départements publiés sont affichés.{% endif %}</p>
 <div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
 <table>
   <caption>Dernière publication de chaque département, avec le nombre de communes par résultat</caption>

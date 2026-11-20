@@ -39,7 +39,7 @@
         <button class="fr-btn--close fr-btn" aria-controls="modal-menu" title="Fermer">Fermer</button>
         <div class="fr-header__menu-links"></div>
         <nav class="fr-nav" id="nav" role="navigation" aria-label="Menu principal"><ul class="fr-nav__list">
-          {% for cle, url, nom in [('accueil','/','Accueil'),('tableau-de-bord','/tableau-de-bord','Tableau de bord'),('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi'),('rapports','/rapports','Rapports'),('resultats','/resultats','Résultats'),('campagnes','/campagnes','Historique')] %}
+          {% for cle, url, nom in [('accueil','/','Accueil'),('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi'),('rapports','/rapports','Rapports'),('resultats','/resultats','Résultats'),('campagnes','/campagnes','Historique')] %}
           <li class="fr-nav__item"><a class="fr-nav__link" href="{{ url }}" target="_self"{% if actif == cle %} aria-current="page"{% endif %}>{{ nom }}</a></li>
           {% endfor %}
         </ul></nav>
