@@ -80,11 +80,13 @@ class LocalTests(WebTests):
     def test_accueil(self):
         status, html = self.call("/")
         self.assertEqual(status, 200)
-        self.assertIn("Lancer une analyse", html)
+        corps = html[html.index("<main"):html.index("</main>")]
+        self.assertNotIn("Lancer une analyse", html)
         self.assertIn('lang="fr"', html)
         self.assertIn("départements publiés", html)                              # chiffres de l'accueil
         self.assertIn("Aucune analyse pour le moment.", html)
-        self.assertIn('href="/analyse"', html)
+        self.assertNotIn('href="/analyse"', corps)                               # le lancement n'est pas dans le corps
+        self.assertIn('href="/analyse"', html)                                   # ... mais reste dans le menu admin
         self.assertIn('name="departement"', self.call("/analyse")[1])            # le choix des départements est sur /analyse
 
     def test_lancer_suivre_arreter(self):
@@ -92,8 +94,8 @@ class LocalTests(WebTests):
         self.assertEqual(status, 303)
         self.wait_log("ARGS --dept 60 01 --resume")
         accueil = self.call("/")[1]
-        self.assertIn("Une analyse est en cours", accueil)                      # l'accueil renvoie vers le suivi
-        self.assertIn('href="/suivi"', accueil)
+        self.assertIn("Une analyse est en cours", accueil)                      # l'accueil signale l'analyse...
+        self.assertNotIn('href="/suivi"', accueil[accueil.index("<main"):accueil.index("</main>")])  # ... sans lien
         status, html = self.call("/suivi")
         self.assertIn("Analyse en cours : 60 01 (reprise)", html)
         self.assertNotIn('http-equiv="refresh"', html)                          # RGAA 13.1 : pas de rechargement imposé

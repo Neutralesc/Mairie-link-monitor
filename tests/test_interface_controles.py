@@ -23,9 +23,13 @@ MDP = "mdp-controle-42"
 CAUSE = sorted(synthese.CAUSES)[0]
 HOSTILE = '"><script>alert(1)</script>'
 HOSTILE_ECHAPPE = "&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"
-NAVIGATION = {"/": "Accueil", "/tableau-de-bord": "Tableau de bord", "/analyse": "Analyse", "/suivi": "Suivi",
+NAVIGATION = {"/": "Accueil", "/analyse": "Analyse", "/suivi": "Suivi",
               "/rapports": "Rapports", "/resultats": "Résultats", "/campagnes": "Historique"}
-PAGES = ["/", "/tableau-de-bord", "/analyse", "/suivi", "/api/etat", "/rapports", "/rapports/60", "/rapports/60/export.html",
+# accueil protégé : menu d'administration de la vue publique (« À propos » et « Campagnes (administration) » en plus)
+NAVIGATION_ACCUEIL = {"/": "Accueil", "/rapports": "Rapports", "/resultats": "Résultats", "/campagnes": "Historique",
+                      "/a-propos": "À propos", "/analyse": "Analyse", "/suivi": "Suivi",
+                      "/admin/campagnes": "Campagnes (administration)"}
+PAGES = ["/", "/analyse", "/suivi", "/api/etat", "/rapports", "/rapports/60", "/rapports/60/export.html",
          "/rapports/60/communes.csv", "/campagnes", "/campagnes/7", "/resultats", "/resultats?dept=60&q=chat",
          "/resultats?page=9", "/csv/60", "/csv/tous"]
 
@@ -77,6 +81,12 @@ class SourceTest:
 
     def liens(self, dept=None):
         return [r for r in LIENS if dept is None or r["dept"] == dept]
+
+    def tous_les_liens(self, q, dept, limit, offset):  # accueil : liste vide, les chiffres et menus restent testés
+        return [], 0
+
+    def nouveaux_liens(self, depuis, limit):
+        return [], 0
 
     def get(self, dept, *, report=True, csv=True):
         return None
@@ -198,14 +208,20 @@ class AuthentificationTests(ServeurInterface):
 
 class StructureTests(ServeurInterface):
     def test_un_seul_h1_par_page(self):
-        for p in ["/", "/tableau-de-bord", "/analyse", "/suivi", "/rapports", "/rapports/60", "/resultats", "/campagnes",
+        for p in ["/", "/analyse", "/suivi", "/rapports", "/rapports/60", "/resultats", "/campagnes",
                   "/campagnes/7"]:
             with self.subTest(page=p):
                 self.assertEqual(len(re.findall(r"<h1[ >]", self.texte(p))), 1)
 
-    def test_menu_sept_entrees_et_entree_active(self):
-        for p, actif in [("/", "/"), ("/tableau-de-bord", "/tableau-de-bord"), ("/analyse", "/analyse"),
-                         ("/suivi", "/suivi"), ("/rapports", "/rapports"), ("/rapports/60", "/rapports"),
+    def test_menu_accueil_protegee_sans_tableau_de_bord(self):
+        t = self.texte("/")
+        liens = re.findall(r'<a class="fr-nav__link" href="([^"]+)" target="_self"', t)
+        self.assertEqual(liens, list(NAVIGATION_ACCUEIL))
+        self.assertNotIn("Tableau de bord", t)
+        self.assertEqual(re.findall(r'href="([^"]+)" target="_self" aria-current="page">', t), ["/"])
+
+    def test_menu_six_entrees_et_entree_active(self):
+        for p, actif in [("/analyse", "/analyse"), ("/suivi", "/suivi"), ("/rapports", "/rapports"), ("/rapports/60", "/rapports"),
                          ("/resultats", "/resultats"), ("/campagnes", "/campagnes"), ("/campagnes/7", "/campagnes")]:
             with self.subTest(page=p):
                 t = self.texte(p)
@@ -222,8 +238,8 @@ class StructureTests(ServeurInterface):
     def test_pied_de_page_et_titre(self):
         t = self.texte("/")
         self.assertIn("Veille des liens Vos questions", t)
-        self.assertIn("Outil de veille. Il ne garantit pas l'exhaustivité des résultats : chaque compte rendu indique ses "
-                      "limites.", t)
+        self.assertIn("Résultats en lecture seule : aucune analyse ne peut être lancée ni modifiée depuis cette page.", t)
+        self.assertIn('href="/a-propos"', t)
         self.assertNotIn("poste de l'agent", t)
         self.assertNotIn("Mettre à jour les sources", t)
 
@@ -379,10 +395,12 @@ class AccueilEtSuiviTests(ServeurInterface):
 
     def test_accueil_chiffres_et_derniere_analyse(self):
         t = self.texte("/")
+        corps = t[t.index("<main"):t.index("</main>")]
         self.assertIn("départements publiés", t)
         self.assertIn("communes à vérifier", t)
-        self.assertIn("Échec", t)
-        self.assertIn('href="/campagnes/7"', t)
+        self.assertIn("n° 7", corps)                       # administrateur : dernière analyse, quel que soit son statut
+        self.assertIn("Échec", corps)
+        self.assertNotIn('href="/campagnes/7"', corps)     # une analyse en échec n'a pas de lien public
 
     def test_api_etat_inactif_avec_analyse_en_echec(self):
         st, en_tetes, corps = self.appel("/api/etat")

@@ -142,7 +142,7 @@ Routes protégées par le mot de passe (toute autre adresse l'est par défaut) :
 
 | Adresse | Contenu |
 |---|---|
-| `/tableau-de-bord` | Tableau de bord d'administration (chiffres, « Lancer une analyse ») |
+| `/tableau-de-bord` | Ancienne adresse du tableau de bord : redirection permanente (308) vers `/`, sans contenu ni mot de passe |
 | `/analyse`, `/suivi`, `/api/etat`, `/arreter`, `/reprendre/<n>`, `/lancer` | Lancement, suivi, arrêt et reprise des analyses |
 | `/resultats` | Liste paginée des communes à lien, administrateur |
 | `/admin/campagnes`, `/admin/campagnes/<n>` | Historique complet (toutes les analyses) et détail avec journal |
@@ -186,13 +186,18 @@ complet affiche la date « Apparu le » et le repère « nouveau » (date dans l
 
 Accès à l'administration : la page publique propose un lien « Espace réservé » vers `/analyse`, qui demande le mot de
 passe. Le navigateur qui a fourni le bon mot de passe voit ensuite, sur la racine et sur les pages publiques, les mêmes
-résultats que les visiteurs, avec le menu complet (« Tableau de bord », « Analyse », « Suivi », « Rapports »,
+résultats que les visiteurs, avec le menu complet (« Analyse », « Suivi », « Rapports »,
 « Résultats », « Historique »). Un identifiant invalide sur une page publique est simplement traité comme un visiteur.
 
-Le tableau de bord d'administration (dernière analyse, chiffres, bouton « Lancer une analyse ») n'est plus à la racine
-quand la lecture publique est ouverte : il est sur `/tableau-de-bord`, toujours protégé par le mot de passe. Il reste
-accessible par l'entrée « Tableau de bord » du menu. Sans `MLM_LECTURE_PUBLIQUE`, la racine reste le tableau de bord
-protégé, comme avant. Aucun bouton de lancement n'apparaît dans la vue résultats, même pour l'administrateur.
+Il n'y a plus de tableau de bord séparé : l'accueil (`/`) reprend en haut ses blocs « Chiffres clés » (un seul ensemble
+de chiffres), « Dernière analyse » et « Rapports ». Visiteur, la dernière analyse affichée est la plus récente parmi les
+analyses terminées, avec son numéro (lien vers `/campagnes/<n>`) et sa date ; l'analyse en cours, interrompue ou en
+échec n'est jamais montrée. Administrateur, la dernière analyse est affichée quel que soit son statut ; une analyse en
+cours est signalée par un simple texte, sans lien. Aucun bouton « Lancer une analyse » ni lien vers `/analyse` ou
+`/suivi` n'apparaît dans le corps de l'accueil, même pour l'administrateur : le lancement et le suivi restent dans le
+menu administrateur, après le mot de passe. Sans `MLM_LECTURE_PUBLIQUE`, `/` reste protégée et affiche ce même accueil,
+avec le menu administrateur. L'ancienne adresse `/tableau-de-bord` redirige en permanence (308) vers `/`, sans demander
+de mot de passe ; les anciens signets sont donc conservés.
 
 Les pages publiques sont marquées `noindex`, et la réponse varie selon l'identifiant (`Vary: Authorization`, sans cache).
 

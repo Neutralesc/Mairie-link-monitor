@@ -27,13 +27,12 @@ PUBLIQUES = ("/", "/a-propos", "/departement/60", "/departement/60.csv", "/rappo
              "/rapports/60/communes.csv", "/rapports/60/export.html", "/campagnes")
 # Protégées même avec la lecture publique : lancement, suivi, administration (/admin/...), formes non listées.
 PROTEGEES = ("/analyse", "/suivi", "/api/etat", "/admin/campagnes", "/admin/campagnes/1", "/admin/rapports/60",
-             "/resultats", "/csv/60", "/csv/tous", "/lancer", "/reprendre/1", "/arreter", "/tableau-de-bord",
+             "/resultats", "/csv/60", "/csv/tous", "/lancer", "/reprendre/1", "/arreter",
              "/inconnu", "/a-propos/", "/departement/60/x", "/departement/60.json", "/departement/abcd",
              "/rapports/60/", "/rapports/60/x", "/rapports/60.csv", "/rapports/60/export.json", "/rapports/abcd",
              "/rapport/60/x", "/campagnes/1/x", "/campagnes/1234567890", "/campagnes/1.json", "/campagnes/-1")
 MENU_ADMIN = ('href="/suivi"', 'href="/rapports"', 'href="/campagnes"')
-MENU_EXPLOITATION = ('href="/suivi"', 'href="/analyse"', 'href="/tableau-de-bord"', 'href="/admin/campagnes"',
-                     'href="/api/etat"')
+MENU_EXPLOITATION = ('href="/suivi"', 'href="/analyse"', 'href="/admin/campagnes"', 'href="/api/etat"')
 MENTION = ("Résultats générés automatiquement à partir de pages publiques ; une absence de lien peut venir d'un site "
            "inaccessible ou d'un lien non détecté.")
 FORMULES = ("=", "+", "-", "@", "\t", "\r")
@@ -137,9 +136,11 @@ class LectureDesactivee(ServeurLecture):
     def test_racine_protegee(self):
         self.assertEqual(self.appel("GET", "/")[0], 401)
         self.assertEqual(self.appel("GET", "/", auth=MOT_DE_PASSE)[0], 200)
-        self.assertIn("Lancer une analyse", self.html("/", auth=MOT_DE_PASSE))  # racine = tableau de bord, comme avant
-        self.assertEqual(self.appel("GET", "/tableau-de-bord")[0], 401)
-        self.assertIn("Lancer une analyse", self.html("/tableau-de-bord", auth=MOT_DE_PASSE))
+        html = self.html("/", auth=MOT_DE_PASSE)           # accueil unique, protégé : mêmes blocs que la lecture publique
+        self.assertIn("Chiffres clés", html)
+        self.assertIn("Dernière analyse", html)
+        self.assertNotIn("Lancer une analyse", html)
+        self.assertNotIn('href="/tableau-de-bord"', html)  # plus d'entrée « Tableau de bord » dans le menu
 
     def test_pages_publiques_ne_s_ouvrent_pas(self):
         for chemin in ("/a-propos", "/departement/60", "/departement/60.csv", "/rapports", "/rapports/60",
@@ -237,8 +238,9 @@ class ContratLecture:
 
     def test_identifiants_valides_menu_complet(self):
         html = self.html("/", auth=MOT_DE_PASSE)
-        for lien in MENU_ADMIN + ('href="/analyse"', 'href="/tableau-de-bord"'):
+        for lien in MENU_ADMIN + ('href="/analyse"',):
             self.assertIn(lien, html)
+        self.assertNotIn('href="/tableau-de-bord"', html)
         self.assertIn(MENTION, html)                       # la racine garde la vue résultats pour l'administrateur
         self.assertIn('id="tous-les-liens"', html)
         self.assertNotIn("Lancer une analyse", html)       # aucun bouton de lancement dans la vue résultats
@@ -246,13 +248,18 @@ class ContratLecture:
         self.assertIn('href="/suivi"', self.html("/a-propos", auth=MOT_DE_PASSE))
         self.assertIn('href="/suivi"', self.html("/departement/60", auth=MOT_DE_PASSE))
 
-    def test_tableau_de_bord_protege_et_complet(self):
-        self.assertEqual(self.appel("GET", "/tableau-de-bord")[0], 401)
-        self.assertEqual(self.appel("GET", "/tableau-de-bord", brut_auth="Basic n-importe-quoi")[0], 401)
-        html = self.html("/tableau-de-bord", auth=MOT_DE_PASSE)
-        self.assertIn("Lancer une analyse", html)          # ancien tableau de bord d'administration
-        self.assertIn('href="/tableau-de-bord"', html)     # entrée de menu active
-        self.assertIn('aria-current="page">Tableau de bord</a>', html)
+    def test_tableau_de_bord_redirige_sans_contenu_ni_authentification(self):
+        # Ancienne adresse : 308 vers l'accueil, sans demander d'identifiants et sans aucun contenu.
+        for auth in (None, "mauvais", MOT_DE_PASSE):
+            with self.subTest(auth=auth):
+                statut, en_tetes, corps = self.appel("GET", "/tableau-de-bord", auth=auth)
+                self.assertEqual(statut, 308)
+                self.assertEqual(en_tetes.get("Location"), "/")
+                self.assertEqual(corps, "")
+                self.assertIsNone(en_tetes.get("WWW-Authenticate"))
+        self.assertEqual(self.appel("GET", "/tableau-de-bord", brut_auth="Basic n-importe-quoi")[0], 308)
+        self.assertEqual(self.appel("HEAD", "/tableau-de-bord")[0], 308)
+        self.assertNotIn("Lancer une analyse", self.appel("GET", "/tableau-de-bord", auth=MOT_DE_PASSE)[2])
 
     def test_en_tete_authorization_invalide_reste_public(self):
         for brut in (basic("x:mauvais"), "Basic ###", "Bearer jeton", "Basic " + base64.b64encode(b"sansdeuxpoints").decode()):
@@ -426,13 +433,11 @@ class LecturePanne(ServeurLecture):
         self.assertIn("Date de la dernière publication indisponible", corps)
         self.assertIn("Limites", corps)
 
-    def test_racine_admin_503_comme_les_visiteurs_tableau_de_bord_garde_son_alerte(self):
+    def test_racine_admin_503_comme_les_visiteurs(self):
         statut, _, corps = self.appel("GET", "/", auth=MOT_DE_PASSE)
         self.assertEqual(statut, 503)                      # résultats publics : même réponse que pour un visiteur
         self.assertIn("ne sont pas disponibles", corps)
-        statut, _, corps = self.appel("GET", "/tableau-de-bord", auth=MOT_DE_PASSE)
-        self.assertEqual(statut, 200)
-        self.assertIn("Base de données indisponible", corps)
+        self.assertEqual(self.appel("GET", "/tableau-de-bord", auth=MOT_DE_PASSE)[0], 308)
 
 
 def principal(html: str) -> str:

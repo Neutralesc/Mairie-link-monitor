@@ -1,4 +1,4 @@
-"""Application web : tableau de bord, lancement et suivi d'une analyse, comptes rendus, CSV, résultats et historique.
+"""Application web : accueil (chiffres, dernière analyse), lancement et suivi d'une analyse, comptes rendus, CSV, résultats et historique.
 
 Bibliothèque standard et Jinja2. Une analyse à la fois : le lancement passe par `runner` (sous-processus local, ou
 GitHub Actions en ligne). Les pages sont des gabarits de src/templates/web (échappement automatique). Les données
@@ -62,6 +62,11 @@ LIENS_CSV_MAX = 200_000          # plafond du CSV « tous les liens » ; au-del�
 ANCRE_LIENS = "#tous-les-liens"
 CHAMPS_TOTAUX = ("nb_communes", "nb_communes_avec_lien", "nb_communes_a_verifier", "nb_communes_sans_lien",
                  "nb_communes_non_analysables")
+# chiffres de l'accueil après le nombre de départements publiés : (champ de synthèse, libellé)
+CHIFFRES_ACCUEIL = (("nb_communes", "communes"), ("nb_communes_avec_lien", "communes avec un lien"),
+                    ("nb_communes_a_verifier", "communes à vérifier"), ("nb_communes_sans_lien", "communes sans lien"),
+                    ("nb_communes_non_analysables", "communes non analysables"))
+ADRESSE_SUPPRIMEE = "/tableau-de-bord"  # ancien tableau de bord : redirigé en permanence vers l'accueil
 CHAMPS_LIENS_CSV = ["departement_code", "departement", "code_insee", "commune", "page_source", "url_cible", "apparu_le"]
 FENETRE_NOUVEAUX_JOURS = 30      # un lien est « nouveau » pendant ce nombre de jours après sa première apparition
 NOUVEAUX_AFFICHES_MAX = 50       # lignes de la section « Nouveaux liens » de l'accueil public
@@ -524,16 +529,9 @@ def etat_analyse(runner, source: PublicationSource) -> dict:
 
 # ----------------------------------------------------------------- pages de données
 
-def _chiffres(resumes: list[dict] | None) -> list[tuple[str, str]]:
-    """Chiffres de l'accueil ; « — » quand les données sont indisponibles."""
-    def somme(cle: str) -> int:
-        return sum(int(r.get(cle) or 0) for r in resumes)
-
-    if resumes is None:
-        valeurs = ["—", "—", "—", "—"]
-    else:
-        valeurs = [len(resumes), somme("nb_communes"), somme("nb_communes_avec_lien"), somme("nb_communes_a_verifier")]
-    return list(zip(valeurs, ["départements publiés", "communes", "communes avec un lien", "communes à vérifier"]))
+def chiffres_accueil(nb_departements: int, totaux: dict[str, int]) -> list[tuple[int, str]]:
+    """Ensemble unique des chiffres clés de l'accueil (tous départements publiés, sans filtre)."""
+    return [(nb_departements, "départements publiés")] + [(totaux[cle], libelle) for cle, libelle in CHIFFRES_ACCUEIL]
 
 
 def filtrer_departements(resumes: list[dict], q: str) -> list[dict]:
@@ -550,6 +548,28 @@ def derniere_publication(resumes: list[dict]) -> str:
 def resumes_publies(source: PublicationSource) -> list[dict]:
     """Résumés des départements publiés (code conforme à CODE_URL), triés par code."""
     return [r for r in source.resumes() if re.fullmatch(CODE_URL, str(r.get("code", "")))]
+
+
+def accueil_sans_donnees() -> dict:
+    """Accueil protégé quand la base est en panne : mêmes blocs, sans données (« — »), avec une alerte."""
+    return dict(
+        alerte="Base de données indisponible : les résultats ne peuvent pas être affichés pour le moment.",
+        total=0, resumes=[], q="", derniere=None,
+        chiffres=[("—", "départements publiés")] + [("—", libelle) for _cle, libelle in CHIFFRES_ACCUEIL],
+        derniere_analyse=None, analyse_en_cours=False,
+        nouveaux=[], total_nouveaux=0, fenetre=FENETRE_NOUVEAUX_JOURS, nouveaux_max=NOUVEAUX_AFFICHES_MAX,
+        liens=[], liens_total=0, liens_page=1, liens_pages=1, dep="", alerte_liens="", liens_pagination="",
+        depts_choix=[], url_csv=url_csv_liens("", ""))
+
+
+def derniere_analyse_accueil(source: PublicationSource, admin: bool) -> dict | None:
+    """Dernière analyse de l'accueil. Visiteur : la plus récente parmi les analyses terminées, sans identifiant
+    d'exécution. Administrateur : la plus récente, quel que soit son statut. Seul « id » donne un lien (si terminée)."""
+    analyses = source.analyses(1) if admin else campagnes_terminees(source, PUBLIC_CAMPAGNES_MAX)[:1]
+    if not analyses:
+        return None
+    a = analyses[0]
+    return {"id": int(a["id"]), "debut": a.get("debut") or "", "statut": a.get("statut") or ""}
 
 
 # ----------------------------------------------------------------- historique public des analyses
@@ -658,8 +678,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
         def indisponible(self):
             self.erreur(503, "Service indisponible", "Base de données indisponible : réessayez plus tard.")
 
-        def redirect(self, location: str):
-            self.send(303, "", "text/plain; charset=utf-8", {"Location": location})
+        def redirect(self, location: str, statut: int = 303):
+            self.send(statut, "", "text/plain; charset=utf-8", {"Location": location})
 
         def csv_reponse(self, data: bytes, nom: str, en_tetes: dict | None = None):
             extra = {"Content-Disposition": f'attachment; filename="{nom}"', **(en_tetes or {})}
@@ -719,6 +739,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             chemin = urlsplit(self.path).path
             if chemin.startswith(STATIC_URL):  # sans mot de passe : ressources publiques uniquement
                 return self.serve_static(chemin)
+            if chemin == ADRESSE_SUPPRIMEE:  # avant tout contrôle : aucun contenu, aucun identifiant demandé
+                return self.redirect("/", 308)
             if self.publique:  # liste blanche : sans mot de passe ; un identifiant valide donne la vue d'administration
                 return self.traiter_publique(chemin, parse_qs(urlsplit(self.path).query, keep_blank_values=True))
             if not self.authorized():
@@ -732,10 +754,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                 self.erreur(500, "Erreur interne", "Une erreur interne s'est produite. Consultez le journal.")
 
         def routes_get(self, chemin: str, params: dict):
-            if chemin == "/":
-                return self.accueil()
-            if chemin == "/tableau-de-bord":  # ancien tableau de bord de la racine, protégé (lecture publique ou non)
-                return self.accueil(actif="tableau-de-bord")
+            if chemin == "/":  # protégée (lecture publique désactivée) : même accueil, menu d'administration
+                return self.public_accueil(params, admin=True, degrade=True)
             if chemin == "/analyse":
                 return self.page_analyse()
             if chemin == "/suivi":
@@ -763,16 +783,6 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             if m := re.fullmatch(rf"/csv/({CODE_URL}|tous)", chemin):
                 return self.csv_publie(m.group(1))
             self.erreur(404, "Page introuvable", "Cette page n'existe pas.")
-
-        def accueil(self, actif: str = "accueil"):
-            chiffres, derniere, alerte = _chiffres(None), None, ""
-            try:
-                chiffres = _chiffres(source.resumes())
-                derniere = (source.analyses(1) or [None])[0]
-            except SourceIndisponible:
-                alerte = "Base de données indisponible : les chiffres ne peuvent pas être affichés pour le moment."
-            self.page("accueil", actif=actif, chiffres=chiffres, derniere=derniere, alerte=alerte,
-                      analyse_en_cours=runner.running())
 
         def page_analyse(self, status: int = 200, erreur: str = ""):
             alerte, resumes, reprises = "", {}, []
@@ -830,6 +840,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
 
         def do_HEAD(self):  # noqa: N802
             chemin = urlsplit(self.path).path
+            if chemin == ADRESSE_SUPPRIMEE:
+                return self.redirect("/", 308)
             if not self.publique:
                 return self.send_error(501, f"Unsupported method ({self.command!r})")
             self.traiter_publique(chemin, parse_qs(urlsplit(self.path).query, keep_blank_values=True))
@@ -864,17 +876,31 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
         def page_publique(self, modele: str, admin: bool, status: int = 200, **ctx):
             self.send(status, _rendre_public(modele, admin=admin, **ctx))
 
-        def public_accueil(self, params: dict, admin: bool):
-            publies = [r for r in source.resumes() if re.fullmatch(CODE_URL, str(r.get("code", "")))]
+        def public_accueil(self, params: dict, admin: bool, degrade: bool = False):
+            """Accueil. `degrade` (accueil protégé seulement) : base en panne = même page sans données, avec une alerte ;
+            pour un visiteur, la panne reste une réponse 503."""
+            try:
+                contexte = self.donnees_accueil(params, admin)
+            except SourceIndisponible:
+                if not degrade:
+                    raise
+                contexte = accueil_sans_donnees()
+            self.page_publique("accueil", admin, actif="accueil", **contexte)
+
+        def donnees_accueil(self, params: dict, admin: bool) -> dict:
+            publies = resumes_publies(source)
             q, dep, alerte, numero = parametres_liens(params, [r["code"] for r in publies])
             lignes, total_liens, numero, pages = tranche_liens(source, q, dep, numero)
             depuis = horloge() - timedelta(days=FENETRE_NOUVEAUX_JOURS)
             nouveaux, total_nouveaux = source.nouveaux_liens(depuis, NOUVEAUX_AFFICHES_MAX)  # communes
             noms = _departements().DEPARTEMENTS
             totaux = {cle: sum(int(r.get(cle) or 0) for r in publies) for cle in CHAMPS_TOTAUX}
-            self.page_publique(
-                "accueil", admin, actif="accueil", total=len(publies), resumes=filtrer_departements(publies, q),
-                q=q, derniere=derniere_publication(publies), totaux=totaux,
+            return dict(
+                total=len(publies), resumes=filtrer_departements(publies, q),
+                q=q, derniere=derniere_publication(publies),
+                chiffres=chiffres_accueil(len(publies), totaux),
+                derniere_analyse=derniere_analyse_accueil(source, admin),
+                analyse_en_cours=admin and runner.running(),
                 nouveaux=[{"apparu_le": c["apparu_le"], "departement": f"{noms.get(c['dept'], '')} ({c['dept']})",
                            "code_insee": c["code_insee"], "commune": c["nom_commune"], "page": c["page"]}
                           for c in nouveaux],

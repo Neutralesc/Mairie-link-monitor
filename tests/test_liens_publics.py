@@ -210,7 +210,7 @@ class ContratLiensPublics:
         for chemin in ("/", "/?page=2", "/?q=zzz-rien", "/?dep=99", "/?dep=60&q=zzz-rien", "/?page=abc", "/?dep=80"):
             with self.subTest(chemin=chemin):
                 html = self.html(chemin)
-                self.assertIn("Synthèse de toutes les publications", html)
+                self.assertIn("Chiffres clés", html)
                 self.assertIn("<caption>Dernière publication de chaque département", html)
                 self.assertIn('<th scope="col">Dernière publication</th>', html)
                 self.assertIn("<thead><tr>", html)
@@ -218,18 +218,16 @@ class ContratLiensPublics:
 
     def test_entete_avec_identifiants_administrateur(self):
         """Avec le mot de passe, « / » affiche les mêmes résultats que pour un visiteur, plus le menu complet ; aucun
-        lancement dans la vue résultats. Le tableau de bord d'administration est sur /tableau-de-bord."""
+        lancement dans la vue résultats. L'ancien tableau de bord (/tableau-de-bord) est redirigé vers l'accueil."""
         html = self.html("/", auth=MOT_DE_PASSE)
-        self.assertIn("Synthèse de toutes les publications", html)
+        self.assertIn("Chiffres clés", html)
         self.assertIn('id="tous-les-liens"', html)
-        self.assertIn('href="/tableau-de-bord"', html)
-        self.assertIn('href="/suivi"', html)
+        self.assertNotIn('href="/tableau-de-bord"', html)
+        self.assertIn('href="/suivi"', html)                    # menu administrateur
         self.assertNotIn("Lancer une analyse", html)
         self.assertNotIn('method="post"', html.lower())
         self.assertNotIn("Espace réservé", html)
-        tableau = self.html("/tableau-de-bord", auth=MOT_DE_PASSE)
-        self.assertIn("Lancer une analyse", tableau)
-        self.assertNotIn('id="tous-les-liens"', tableau)
+        self.assertEqual(self.appel("GET", "/tableau-de-bord", auth=MOT_DE_PASSE)[0], 308)
 
     def test_csv_entete_lignes_et_en_tetes(self):
         statut, en_tetes, corps = self.appel("GET", "/resultats.csv")
@@ -348,7 +346,7 @@ class ContratNouveaux:
         for chemin in ("/", "/?page=2", "/?q=zzz-rien"):
             with self.subTest(chemin=chemin):
                 html = self.html(chemin)
-                self.assertIn("Synthèse de toutes les publications", html)
+                self.assertIn("Chiffres clés", html)
                 self.assertIn('<th scope="col">Dernière publication</th>', html)
                 self.assertIn('<th scope="col">Apparu le</th>', html)
 

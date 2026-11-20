@@ -143,7 +143,7 @@ class ApiBaseEnPanneTests(ServeurApi):
         with self.assertLogs("api", level="WARNING") as logs:
             status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
-        self.assertIn("Lancer une analyse", corps)
+        self.assertNotIn("Lancer une analyse", corps)
         self.assertIn("Base de données indisponible", corps)    # alerte à la place de la liste des départements
         self.assertNotIn("Aucun département analysé", corps)
         texte = "\n".join(logs.output)
@@ -198,7 +198,8 @@ class ApiPostgresTests(ServeurApi, sp.PgSchemaTestCase):
     def test_avec_basic_accueil_lit_postgres(self):
         status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
-        self.assertIn("Lancer une analyse", corps)
+        self.assertNotIn("Lancer une analyse", corps)            # l'accueil n'expose aucun lancement
+        self.assertIn("Chiffres clés", corps)
         self.assertIn("Résultats publiés", corps)                # chiffres lus dans Postgres
         self.assertIn('href="/rapports"', corps)                 # accès aux rapports publiés
         rapports = self.appel("/rapports", auth=MOT_DE_PASSE)[2]

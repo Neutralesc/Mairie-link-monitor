@@ -64,6 +64,14 @@ class MemSource:
         self._verifier()
         return list(self._depts)
 
+    def tous_les_liens(self, q, dept, limit, offset):  # accueil protégé : liste vide (le tableau n'est pas testé ici)
+        self._verifier()
+        return [], 0
+
+    def nouveaux_liens(self, depuis, limit):
+        self._verifier()
+        return [], 0
+
     def liens(self, dept: str | None = None) -> list[dict]:
         self._verifier()
         return [r for r in self._liens if dept is None or r["dept"] == dept]

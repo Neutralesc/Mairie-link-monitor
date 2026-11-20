@@ -139,8 +139,7 @@ class LectureActiveeTests(ServeurApi):
             self.assertNotIn(secret, corps)
 
     def test_protegees_toujours_401(self):
-        for chemin in ("/analyse", "/suivi", "/api/etat", "/admin/campagnes", "/admin/rapports/60", "/inconnu",
-                       "/tableau-de-bord"):
+        for chemin in ("/analyse", "/suivi", "/api/etat", "/admin/campagnes", "/admin/rapports/60", "/inconnu"):
             with self.subTest(chemin=chemin):
                 self.assertEqual(self.appel(chemin)[0], 401)
 
@@ -157,8 +156,8 @@ class LectureActiveeTests(ServeurApi):
     def test_racine_admin_avec_identifiant_valide(self):
         self.assertEqual(self.appel("/", auth=MOT_DE_PASSE)[0], 503)  # résultats publics : base en panne, comme un visiteur
         self.assertEqual(self.appel("/", auth="mauvais")[0], 503)  # identifiant invalide : visiteur, pas de 401
-        self.assertEqual(self.appel("/tableau-de-bord", auth=MOT_DE_PASSE)[0], 200)  # tableau de bord, alerte incluse
-        self.assertEqual(self.appel("/tableau-de-bord", auth="mauvais")[0], 401)
+        self.assertEqual(self.appel("/tableau-de-bord", auth=MOT_DE_PASSE)[0], 308)  # ancienne adresse : redirigée
+        self.assertEqual(self.appel("/tableau-de-bord", auth="mauvais")[0], 308)
 
     def test_post_consultation_405_meme_avec_origine_valide(self):
         status, en_tetes, _ = self.appel("/departement/60", methode="POST", origine=True, corps=b"dept=60")

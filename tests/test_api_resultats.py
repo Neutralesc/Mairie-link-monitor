@@ -145,7 +145,7 @@ class ApiResultatsBasePanneTests(ServeurApi):
         with self.assertLogs("api", level="WARNING"):
             status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
-        self.assertIn("Lancer une analyse", corps)
+        self.assertNotIn("Lancer une analyse", corps)
         self.assertIn("Base de données indisponible", corps)
         self.assertIn('href="/resultats" target="_self">Résultats</a>', corps)   # menu toujours présent
 
