@@ -676,6 +676,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
         def routes_get(self, chemin: str, params: dict):
             if chemin == "/":
                 return self.accueil()
+            if chemin == "/tableau-de-bord":  # ancien tableau de bord de la racine, protégé (lecture publique ou non)
+                return self.accueil(actif="tableau-de-bord")
             if chemin == "/analyse":
                 return self.page_analyse()
             if chemin == "/suivi":
@@ -700,14 +702,14 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                 return self.csv_publie(m.group(1))
             self.erreur(404, "Page introuvable", "Cette page n'existe pas.")
 
-        def accueil(self):
+        def accueil(self, actif: str = "accueil"):
             chiffres, derniere, alerte = _chiffres(None), None, ""
             try:
                 chiffres = _chiffres(source.resumes())
                 derniere = (source.analyses(1) or [None])[0]
             except SourceIndisponible:
                 alerte = "Base de données indisponible : les chiffres ne peuvent pas être affichés pour le moment."
-            self.page("accueil", actif="accueil", chiffres=chiffres, derniere=derniere, alerte=alerte,
+            self.page("accueil", actif=actif, chiffres=chiffres, derniere=derniere, alerte=alerte,
                       analyse_en_cours=runner.running())
 
         def page_analyse(self, status: int = 200, erreur: str = ""):
@@ -774,9 +776,7 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             admin = self.identifiants_valides()
             genre, code = route_publique(chemin)
             try:
-                if genre == "accueil" and admin:
-                    return self.accueil()  # tableau de bord complet, réservé à l'identifiant valide
-                if genre == "accueil":
+                if genre == "accueil":  # mêmes résultats pour tous ; l'identifiant valide ajoute le menu complet
                     return self.public_accueil(params, admin)
                 if genre == "apropos":
                     return self.public_apropos(admin)

@@ -10,6 +10,8 @@ Configuration (variables d'environnement, jamais de valeur dans les pages ni dan
   facultatives : MLM_GH_REF (défaut « main »), MLM_GH_WORKFLOW (défaut « analyse.yml »)
   facultative : MLM_LECTURE_PUBLIQUE (1, true ou oui) : la racine et quelques pages de lecture deviennent publiques
                 (voir webapp.route_publique) ; l'administration reste derrière le mot de passe
+  facultatives : MLM_HOTE_PRINCIPAL (nom d'hôte seul) et MLM_HOTES_REDIRIGES (liste séparée par des virgules) :
+                toute requête sur un hôte redirigé est renvoyée en 308 vers l'hôte principal (voir _destination_redirigee)
 Si une variable obligatoire manque (ou si la configuration est invalide), toute requête reçoit 503 avec la liste des
 noms des variables manquantes : l'interface n'est jamais servie sans mot de passe.
 """
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 from html import escape
@@ -208,6 +211,66 @@ from urllib.parse import quote  # noqa: E402
 
 TAILLE_MAX_CORPS = 100_000
 
+# ----------------------------------------------------------------- redirection d'hôte (ancienne adresse)
+# Le même déploiement répond sur plusieurs noms d'hôte ; les noms listés dans MLM_HOTES_REDIRIGES sont renvoyés en 308
+# vers MLM_HOTE_PRINCIPAL. Lu une fois au chargement ; une valeur invalide est ignorée avec un avertissement.
+VARIABLE_HOTE_PRINCIPAL = "MLM_HOTE_PRINCIPAL"
+VARIABLE_HOTES_REDIRIGES = "MLM_HOTES_REDIRIGES"
+HOTE_VALIDE = re.compile(r"[a-z0-9.-]+")
+# Chemin de la requête : un seul « / » au début, sans caractère de contrôle (retour à la ligne compris).
+CHEMIN_REDIRECTION = re.compile(r"/(?![/\\])[^\x00-\x1f\x7f]*")
+
+
+def _normaliser_hote(valeur: str) -> str:
+    """Minuscules, sans espaces, sans port ni point final : « Exemple.fr:443. » donne « exemple.fr »."""
+    return re.sub(r":[0-9]+$", "", valeur.strip().lower()).rstrip(".")
+
+
+def _lire_redirections() -> tuple[str, frozenset[str]] | None:
+    """(hôte principal, hôtes redirigés) si la configuration est complète et valide ; None sinon (aucun effet)."""
+    principal = _normaliser_hote(_env(VARIABLE_HOTE_PRINCIPAL))
+    if principal and not HOTE_VALIDE.fullmatch(principal):
+        log.warning("api.redirection : %s invalide, ignorée", VARIABLE_HOTE_PRINCIPAL)
+        principal = ""
+    redirigés = set()
+    for valeur in _env(VARIABLE_HOTES_REDIRIGES).split(","):
+        if not valeur.strip():
+            continue
+        hote = _normaliser_hote(valeur)
+        if HOTE_VALIDE.fullmatch(hote):
+            redirigés.add(hote)
+        else:
+            log.warning("api.redirection : une valeur de %s est invalide, ignorée", VARIABLE_HOTES_REDIRIGES)
+    redirigés.discard(principal)
+    if not principal or not redirigés:
+        if redirigés or _env(VARIABLE_HOTE_PRINCIPAL).strip():
+            log.warning("api.redirection : %s et %s doivent être renseignées ensemble ; aucune redirection",
+                        VARIABLE_HOTE_PRINCIPAL, VARIABLE_HOTES_REDIRIGES)
+        return None
+    return principal, frozenset(redirigés)
+
+
+REDIRECTION = _lire_redirections()
+
+
+def _destination_redirigee(environ) -> str | None:
+    """Adresse 308 de la requête, ou None. L'hôte de destination est toujours celui de la variable, jamais celui de la
+    requête ; seul le chemin et la requête viennent de la requête, assainis et encodés."""
+    if REDIRECTION is None:
+        return None
+    principal, redirigés = REDIRECTION
+    hote = _normaliser_hote(environ.get("HTTP_X_FORWARDED_HOST", "").split(",")[0] or environ.get("HTTP_HOST", ""))
+    if hote not in redirigés:
+        return None
+    chemin = environ.get("PATH_INFO") or "/"
+    requete = environ.get("QUERY_STRING", "")
+    if not CHEMIN_REDIRECTION.fullmatch(chemin):
+        chemin, requete = "/", ""  # chemin suspect (« //hote », « \\hote », contrôle) : accueil de l'hôte principal seul
+    destination = f"https://{principal}{quote(chemin, safe='/%:@!$&()*+,;=-._~')}"
+    if requete:
+        destination += "?" + quote(requete, safe="%:@!$&'()*+,;=-._~/?")
+    return destination
+
 
 class _FausseSocket:
     def __init__(self, donnees: bytes):
@@ -257,6 +320,12 @@ def _requete_brute(environ) -> bytes:
 
 def app(environ, start_response):
     """Application WSGI : rejoue la requête dans `handler` (BaseHTTPRequestHandler) et renvoie sa réponse."""
+    destination = _destination_redirigee(environ)  # avant toute authentification et avant la configuration
+    if destination is not None:
+        start_response("308 Permanent Redirect", [
+            ("Location", destination), ("Content-Length", "0"), ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff")])
+        return [b""]
     socket = _FausseSocket(_requete_brute(environ))
     adresse = (environ.get("HTTP_X_FORWARDED_FOR", "").split(",")[0].strip() or environ.get("REMOTE_ADDR", "0.0.0.0"), 0)
     try:
