@@ -201,8 +201,9 @@ class ContratLecture:
                 for valeur in attributs_href_action(html):
                     self.assertFalse(valeur.startswith("javascript:"), valeur)
                     if valeur.startswith("/"):
-                        self.assertTrue(valeur in ("/", "/a-propos", "/analyse")
-                                        or valeur.startswith(("/departement/", "/static/")), valeur)
+                        chemin_seul = valeur.split("#")[0].split("?")[0]  # ancre et filtres : même route publique
+                        self.assertTrue(chemin_seul in ("/", "/a-propos", "/analyse", "/resultats.csv")
+                                        or chemin_seul.startswith(("/departement/", "/static/")), valeur)
                 self.assertEqual(attributs_href_action(html).count("/analyse"), 1)  # Espace réservé, une seule fois
 
     def test_identifiants_valides_menu_complet(self):
@@ -257,7 +258,7 @@ class ContratLecture:
         self.assertIn('href="/departement/60.csv"', html)
         filtre = self.html("/?q=SOMME")  # sans accents ni casse
         self.assertIn("Somme", filtre)
-        self.assertNotIn("Oise", filtre)
+        self.assertNotIn('href="/departement/60"', filtre)  # le tableau départements est filtré (la liste déroulante des liens ne l'est pas)
         self.assertIn("Aucun département", self.html("/?q=zzz-rien"))
         self.assertIn("Oise", self.html("/?q=60"))
 

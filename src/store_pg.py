@@ -13,7 +13,10 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from publications import CSV_TOUS, Publication, PublicationSource, trier_liens
+from datetime import datetime
+
+from publications import (CSV_TOUS, Publication, PublicationSource, liens_confirmes, selection_liens,
+                          trier_liens)
 from synthese import resume as resume_synthese
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -53,7 +56,24 @@ CREATE TABLE IF NOT EXISTS analyses (
     run_id TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS analyses_une_active ON analyses ((TRUE)) WHERE statut IN ('file','en_cours');
+CREATE TABLE IF NOT EXISTS liens_vus (
+    departement TEXT NOT NULL,
+    code_insee TEXT NOT NULL,
+    url_page_source TEXT NOT NULL,
+    url_cible TEXT NOT NULL DEFAULT '',
+    commune TEXT NOT NULL DEFAULT '',
+    premiere_vue TIMESTAMPTZ NOT NULL DEFAULT now(),
+    nouveau BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY (departement, code_insee, url_page_source, url_cible)
+);
+CREATE INDEX IF NOT EXISTS liens_vus_nouveaux ON liens_vus (premiere_vue) WHERE nouveau;
 """
+# Première apparition des liens confirmés. Insertion seule (ON CONFLICT DO NOTHING) : un lien déjà connu garde sa date.
+_INSERT_LIEN_VU = ("INSERT INTO liens_vus (departement, code_insee, url_page_source, url_cible, commune) "
+                   "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING")
+# Amorçage à la création de la table : résultats déjà publiés, marqués non nouveaux, datés de leur publication.
+_INSERT_LIEN_BASE = ("INSERT INTO liens_vus (departement, code_insee, url_page_source, url_cible, commune, premiere_vue, "
+                     "nouveau) VALUES (%s, %s, %s, %s, %s, %s, FALSE) ON CONFLICT DO NOTHING")
 
 JOURNAL_MAX = 4000
 CONNECT_TIMEOUT_S = 5  # délai de connexion : une base injoignable ne bloque pas une requête web ou le runner
@@ -95,8 +115,23 @@ def connect(url: str) -> psycopg.Connection:
     return psycopg.connect(url, autocommit=False, connect_timeout=CONNECT_TIMEOUT_S)
 
 
+def _lignes_liens(dept: str, synth: dict | None) -> list[tuple]:
+    return [(l["dept"], l["code_insee"], l["url_page_source"], l["url_cible"], l["nom_commune"])
+            for l in (liens_confirmes(dept, synth) if synth is not None else [])]
+
+
 def ensure_schema(conn) -> None:
+    """Crée les tables manquantes. À la création de liens_vus, amorce la table avec les résultats déjà publiés
+    (nouveau = FALSE, datés de leur publication) : l'existant avant la fonctionnalité n'est pas compté comme nouveau."""
+    existait = conn.execute("SELECT to_regclass('liens_vus') IS NOT NULL").fetchone()[0]
     conn.execute(SCHEMA_SQL)
+    if not existait:
+        base = []
+        for dept, brut, publie in conn.execute("SELECT dept, synthese_json, publie_le FROM publications").fetchall():
+            base.extend(lien + (publie,) for lien in _lignes_liens(dept, _objet_json(brut)))
+        if base:
+            with conn.cursor() as cur:
+                cur.executemany(_INSERT_LIEN_BASE, [(d, c, p, t, n, when) for d, c, p, t, n, when in base])
     conn.commit()
 
 
@@ -126,6 +161,8 @@ def publish(source: PublicationSource, conn, only: list[str] | None = None) -> d
             conn.execute(_UPSERT_DEPT, (pub.dept, pub.controle_date, pub.communes, pub.avec_lien, pub.report_html,
                                         pub.csv_bytes, pub.csv_present, pub.resume_changements, liens_json,
                                         synthese_json, resume_json))
+            with conn.cursor() as cur:  # même transaction : première apparition des liens nouvellement confirmés
+                cur.executemany(_INSERT_LIEN_VU, _lignes_liens(dept, synth))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -162,6 +199,7 @@ class PostgresSource:
         self.url = url
         self._verrou = threading.Lock()
         self._leger: tuple[float, dict[str, Publication]] | None = None
+        self._liens: dict[str, tuple[float, list[dict]]] = {}  # liens confirmés par département ('' = tous)
         _psycopg()  # erreur claire dès la construction si psycopg manque
 
     def _connect(self):
@@ -229,6 +267,58 @@ class PostgresSource:
                 sortie.append({"dept": d, "code_insee": str(e.get("code_insee") or ""),
                                "nom_commune": str(e.get("nom_commune") or ""), "url_page": str(e.get("url_page") or "")})
         return trier_liens(sortie)
+
+    def _liens_confirmes(self, dept: str | None) -> list[dict]:
+        """Liens confirmés de synthese_json (seule colonne lue : pas de compte rendu ni de CSV), gardés CACHE_LEGER_S s.
+
+        Une ligne sans synthèse (« {} », JSON invalide) est ignorée sans erreur. Chaque lien reçoit premiere_vue et
+        nouveau, lus de liens_vus (None et False si le lien n'y figure pas).
+        """
+        cle = dept or ""
+        with self._verrou:
+            entree = self._liens.get(cle)
+            if entree is not None and time.monotonic() - entree[0] < CACHE_LEGER_S:
+                return entree[1]
+        with self._connect() as conn:
+            if dept is None:
+                rows = conn.execute("SELECT dept, synthese_json FROM publications ORDER BY dept").fetchall()
+                vues = conn.execute("SELECT departement, code_insee, url_page_source, url_cible, premiere_vue, nouveau "
+                                    "FROM liens_vus").fetchall()
+            else:
+                rows = conn.execute("SELECT dept, synthese_json FROM publications WHERE dept = %s",
+                                    (dept,)).fetchall()
+                vues = conn.execute("SELECT departement, code_insee, url_page_source, url_cible, premiere_vue, nouveau "
+                                    "FROM liens_vus WHERE departement = %s", (dept,)).fetchall()
+        connus = {(v[0], v[1], v[2], v[3]): (v[4], bool(v[5])) for v in vues}
+        lignes: list[dict] = []
+        for d, brut in rows:
+            synth = _objet_json(brut)
+            if synth is not None:
+                lignes.extend(liens_confirmes(d, synth))
+        for lien in lignes:
+            vu = connus.get((lien["dept"], lien["code_insee"], lien["url_page_source"], lien["url_cible"]))
+            lien["premiere_vue"] = vu[0].isoformat() if vu else None
+            lien["nouveau"] = vu[1] if vu else False
+        with self._verrou:
+            self._liens[cle] = (time.monotonic(), lignes)
+        return lignes
+
+    def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Une ligne par lien confirmé, filtrée (q, dept), triée, paginée en mémoire sur le cache court."""
+        return selection_liens(self._liens_confirmes(dept), q, limit, offset)
+
+    def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]:
+        """Liens nouveaux depuis `depuis`, plus récents d'abord : LIMIT/OFFSET et COUNT côté base (index partiel)."""
+        with self._connect() as conn:
+            lignes = conn.execute(
+                "SELECT departement, code_insee, commune, url_page_source, url_cible, premiere_vue FROM liens_vus "
+                "WHERE nouveau AND premiere_vue >= %s "
+                "ORDER BY premiere_vue DESC, departement, commune, code_insee, url_page_source, url_cible LIMIT %s",
+                (depuis, int(limit))).fetchall()
+            total = conn.execute("SELECT count(*) FROM liens_vus WHERE nouveau AND premiere_vue >= %s",
+                                 (depuis,)).fetchone()[0]
+        return [{"dept": r[0], "code_insee": r[1], "nom_commune": r[2], "url_page_source": r[3], "url_cible": r[4],
+                 "premiere_vue": r[5].isoformat(), "nouveau": True} for r in lignes], int(total)
 
     def csv_all(self) -> bytes | None:
         with self._connect() as conn:
