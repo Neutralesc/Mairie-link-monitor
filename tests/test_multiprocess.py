@@ -57,8 +57,10 @@ class MultiProcessTests(unittest.TestCase):
                  "confiance_lot2": "probable_officiel", "ssl_invalide": False, "_dept": dept, "known_pages": []}
                 for i in range(1, N + 1)]
 
+    # verif_ip False : les serveurs de test sont sur 127.0.0.x, refusés par la protection anti-SSRF (test dédié :
+    # test_securite_reseau).
     OPTS = dict(max_pages=5, max_depth=1, concurrency=10, host_delay=0, timeout=5, site_timeout=20, contact="",
-                use_sitemap=False, retry_failed=False, insecure_ssl=True, max_par_domaine=4)
+                use_sitemap=False, retry_failed=False, insecure_ssl=True, max_par_domaine=4, verif_ip=False)
 
     def test_plusieurs_processus_toutes_les_reponses_recues(self):
         got = []
@@ -109,7 +111,13 @@ class MultiProcessTests(unittest.TestCase):
             args = Namespace(max_pages=5, max_depth=1, concurrency=10, processes=2, host_delay=0, timeout=5, site_timeout=20,
                              include=list(c.DEFAULT_INCLUDE), no_insecure_ssl=False, limit_sites=0, commune=None, contact="",
                              resume=False, use_sitemap=False, recheck_known=True, retry_failed=False, max_par_domaine=4)
-            with mock.patch("builtins.print"):
+            # run_many ne transmet pas `verif_ip` depuis ses arguments (écart signalé) : l'option est ajoutée ici, à
+            # l'appel de crawl_sites, ce qui garde le vrai pool de processus. Sans cela, 127.0.0.x est refusé.
+            vrai_crawl_sites = c.crawl_sites
+
+            def crawl_sans_anti_ssrf(sites, opts, *a, **k):
+                return vrai_crawl_sites(sites, {**opts, "verif_ip": False}, *a, **k)
+            with mock.patch("builtins.print"), mock.patch.object(c, "crawl_sites", crawl_sans_anti_ssrf):
                 rc = c.run_many([p], args, on_dept_done=lambda paths: done.append(len(helpers.dict_rows(paths.crawl_sites))))
             self.assertEqual((rc, done), (0, [N]))                       # écrit une seule fois, complet, à la fin du département
             self.assertEqual(len({r["code_insee"] for r in helpers.dict_rows(p.links_found)}), N // 2)

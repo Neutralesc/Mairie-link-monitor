@@ -50,7 +50,10 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(v["no_discover"])
             self.assertFalse(v["no_retry"])
             self.assertEqual((v["delimiter"], v["export_mode"]), (";", "une_page_par_commune"))
-            self.assertEqual(v["steps"], ["inventory", "discover", "crawl", "plateformes", "export"])
+            self.assertEqual(v["steps"], ["inventory", "discover", "crawl", "export"])   # plateformes : hors défaut
+            self.assertNotIn("plateformes", v["steps"])
+            self.assertEqual((v["max_pages"], v["max_depth"], v["site_timeout"]), (500, 5, 900.0))
+            self.assertEqual((v["host_delay"], v["adaptive_delay"]), (0.5, True))
             self.assertGreaterEqual(v["concurrency"], 200)           # parallélisme élevé par défaut
             self.assertEqual(v["processes"], 0)                      # automatique
 
@@ -70,7 +73,7 @@ class ConfigTests(unittest.TestCase):
             cfg.update_value(p, "contact", "moi@exemple.fr")
             cfg.update_value(p, "parallelisme", 10)
             v = cfg.load(p)
-            self.assertEqual((v["contact"], v["concurrency"], v["max_pages"]), ("moi@exemple.fr", 10, 40))
+            self.assertEqual((v["contact"], v["concurrency"], v["max_pages"]), ("moi@exemple.fr", 10, 500))
 
     def test_migration_d_un_ancien_fichier(self):
         with tempfile.TemporaryDirectory() as tmp:

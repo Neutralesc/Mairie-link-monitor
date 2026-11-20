@@ -55,6 +55,11 @@ def charger_handler(env: dict):
     return module.handler
 
 
+class _SansRedirection(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
 class ServeurApi(unittest.TestCase):
     def demarrer(self, env: dict) -> None:
         handler = charger_handler(env)
@@ -67,15 +72,17 @@ class ServeurApi(unittest.TestCase):
         self.serveur.shutdown()
         self.serveur.server_close()
 
-    def appel(self, chemin: str, auth: str | None = None, data: bytes | None = None):
-        """Retourne (statut, en-têtes, corps en texte). Les réponses d'erreur HTTP ne lèvent pas d'exception."""
+    def appel(self, chemin: str, auth: str | None = None, data: bytes | None = None, suivre: bool = True):
+        """Retourne (statut, en-têtes, corps en texte). Les réponses d'erreur HTTP ne lèvent pas d'exception.
+        suivre=False : une redirection (303) est renvoyée telle quelle, avec son en-tête Location."""
         req = urllib.request.Request(self.base + chemin, data=data)
         if auth is not None:
             req.add_header("Authorization", "Basic " + base64.b64encode(f"x:{auth}".encode()).decode())
         if data is not None:
             req.add_header("Origin", self.base)
+        opener = urllib.request.build_opener() if suivre else urllib.request.build_opener(_SansRedirection)
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with opener.open(req, timeout=10) as r:
                 return r.status, r.headers, r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read().decode("utf-8", "replace")
@@ -192,14 +199,18 @@ class ApiPostgresTests(ServeurApi, sp.PgSchemaTestCase):
         status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
         self.assertIn("Lancer une analyse", corps)
-        self.assertIn("Résultats par département", corps)
-        self.assertIn('href="/rapport/60"', corps)              # publié dans le schéma de test
-        self.assertIn('href="/csv/tous"', corps)                 # CSV global publié
+        self.assertIn("Résultats publiés", corps)                # chiffres lus dans Postgres
+        self.assertIn('href="/rapports"', corps)                 # accès aux rapports publiés
+        rapports = self.appel("/rapports", auth=MOT_DE_PASSE)[2]
+        self.assertIn('href="/rapports/60"', rapports)           # publié dans le schéma de test
+        self.assertIn("Oise", rapports)
 
     def test_rapport_et_csv_depuis_postgres(self):
-        status, _, corps = self.appel("/rapport/60", auth=MOT_DE_PASSE)
+        status, en_tetes, _ = self.appel("/rapport/60", auth=MOT_DE_PASSE, suivre=False)   # ancienne adresse : redirigée
+        self.assertEqual((status, en_tetes.get("Location")), (303, "/rapports/60"))
+        status, _, corps = self.appel("/rapports/60", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
-        self.assertIn("Compte rendu 60", corps)
+        self.assertIn("Oise (60)", corps)                        # compte rendu construit à partir de la synthèse publiée
         status, _, octets = self.appel("/csv/60", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
         self.assertEqual(octets.encode("utf-8"), FileSource(self.racine).get("60").csv_bytes)

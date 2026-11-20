@@ -85,6 +85,22 @@ class MemSource:
         self._verifier()
         return self._csv_global is not None
 
+    def synthese(self, dept: str) -> dict | None:
+        self._verifier()
+        return None                                  # pas de synthèse en mémoire : les pages de rapport sont testées ailleurs
+
+    def resumes(self) -> list[dict]:
+        self._verifier()
+        return []                                    # aucun département à résumer (accueil : chiffres à zéro)
+
+    def analyses(self, limit: int = 50) -> list[dict]:
+        self._verifier()
+        return []
+
+    def analyse(self, analysis_id: int) -> dict | None:
+        self._verifier()
+        return None
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
@@ -181,18 +197,19 @@ class ResultatsBasiqueTests(ServeurResultats):
         self.assertIn("<strong>2 communes avec lien</strong>", self.page_resultats("dept=60"))
         self.assertIn("<strong>0 commune avec lien</strong>", self.page_resultats("q=zzzz"))
 
-    def test_navigation_resultats_active_et_analyses_inactive(self):
+    def test_navigation_resultats_active_et_autres_entrees_inactives(self):
         html = self.page_resultats()
         self.assertIn('<a class="fr-nav__link" href="/resultats" target="_self" aria-current="page">Résultats</a>', html)
-        self.assertIn('<a class="fr-nav__link" href="/" target="_self">Analyses</a>', html)
+        self.assertIn('<a class="fr-nav__link" href="/analyse" target="_self">Analyse</a>', html)
+        self.assertIn('<a class="fr-nav__link" href="/" target="_self">Accueil</a>', html)
         self.assertEqual(html.count('aria-current="page"'), 1)
 
-    def test_accueil_affiche_analyses_active(self):
+    def test_accueil_affiche_accueil_active(self):
         status, _, html = self.appel("/")
         self.assertEqual(status, 200)
-        self.assertIn('<a class="fr-nav__link" href="/" target="_self" aria-current="page">Analyses</a>', html)
+        self.assertIn('<a class="fr-nav__link" href="/" target="_self" aria-current="page">Accueil</a>', html)
         self.assertIn('<a class="fr-nav__link" href="/resultats" target="_self">Résultats</a>', html)
-        self.assertIn("Résultats par département", html)
+        self.assertIn("Résultats publiés", html)                 # chiffres de l'accueil
 
 
 class PaginationTests(ServeurResultats):
@@ -336,11 +353,19 @@ class RapportEtCsvInchangesTests(ServeurResultats):
         return MemSource(LIENS_PETITS, depts=["60", "80"], csv_global=CSV_60, sans_csv=["80"])
 
     def test_rapport_et_csv_statuts(self):
-        attendus = {"/rapport/60": 200, "/rapport/80": 200, "/rapport/99": 404,
+        # Ancienne adresse /rapport/<dép> : 303 vers la page du département quand il est publié, 404 sinon.
+        # Le CSV d'un département sans fichier reste absent (404) même si le département est publié.
+        attendus = {"/rapport/60": 303, "/rapport/80": 303, "/rapport/99": 404,
                     "/csv/60": 200, "/csv/80": 404, "/csv/99": 404, "/csv/tous": 200}
         for chemin, statut in attendus.items():
             with self.subTest(chemin=chemin):
                 self.assertEqual(self.appel(chemin)[0], statut)
+
+    def test_rapport_redirige_vers_la_page_du_departement(self):
+        opener = urllib.request.build_opener(NoRedirect)
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            opener.open(self.base + "/rapport/60", timeout=5)
+        self.assertEqual((e.exception.code, e.exception.headers.get("Location")), (303, "/rapports/60"))
 
     def test_csv_60_octets_conserves(self):
         status, en_tetes, corps = self.appel("/csv/60")

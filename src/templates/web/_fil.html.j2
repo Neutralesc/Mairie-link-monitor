@@ -1,0 +1,9 @@
+{# Fil d'Ariane : `fil` = liste de (url, libellé) ; le dernier élément est la page courante #}
+<nav role="navigation" class="fr-breadcrumb" aria-label="vous êtes ici :">
+  <button class="fr-breadcrumb__button" aria-expanded="false" aria-controls="breadcrumb">Voir le fil d'Ariane</button>
+  <div class="fr-collapse" id="breadcrumb"><ol class="fr-breadcrumb__list">
+    {% for url, nom in fil %}
+    <li>{% if loop.last %}<a class="fr-breadcrumb__link" aria-current="page">{{ nom }}</a>{% else %}<a class="fr-breadcrumb__link" href="{{ url }}">{{ nom }}</a>{% endif %}</li>
+    {% endfor %}
+  </ol></div>
+</nav>

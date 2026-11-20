@@ -7,7 +7,8 @@ Sorties : reports/<dep>/links_found.csv   une ligne par lien trouvé (page, URL 
           reports/<dep>/crawl_summary.json
 
 Principes :
-  * parcours en LARGEUR, sans aucune priorité de contenu, et ARRÊT au premier lien trouvé sur un site ;
+  * parcours PRIORISÉ (menu/bandeau, puis contenu à mot-clé utile, puis le reste ; profondeur max 5 par défaut),
+    pages de recherche/administration exclues, et ARRÊT au premier lien trouvé sur un site ;
   * asyncio : une file de sites traitée par N tâches concurrentes ; plusieurs processus (un par cœur utile) ;
     analyse HTML avec selectolax (Lexbor) ;
   * robots.txt consulté pour chaque origine avant toute page (Disallow, Crawl-delay) ; délai minimal par site ;
@@ -32,9 +33,12 @@ import re
 import socket
 import ssl
 import time
+import unicodedata
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
@@ -44,6 +48,7 @@ from selectolax.lexbor import LexborHTMLParser
 
 import csvio
 import metrics as mt
+import securite_reseau
 import tuning
 from layout import DeptPaths
 from robots_rfc import RobotsRules
@@ -61,6 +66,9 @@ SITEMAP_SEEDS = 15
 SITEMAP_MAX_LOC = 2000
 CHECKPOINT_EVERY = 100
 METRICS: "mt.Metrics | None" = None     # collecteur du processus courant (None = mesures désactivées)
+# Anti-SSRF : contrôle de l'hôte avant chaque requête (y compris chaque saut de redirection). Positionné par crawl_all :
+# actif par défaut hors transport simulé ; `resoudre` (optionnel) remplace la résolution DNS (tests, banc d'essai).
+SECURITE: dict = {"actif": False, "resoudre": None}
 MAX_PER_PROCESS = 100      # au-delà, le coût CPU par page augmente et le débit baisse (mesuré)
 HTML_TYPES = ("text/html", "application/xhtml+xml")
 SKIP_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".zip", ".rar", ".7z", ".doc", ".docx",
@@ -70,6 +78,8 @@ SKIP_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".
 DEFAULT_INCLUDE = ("probable_officiel", "a_verifier", "plateforme_tierce_a_verifier", "intercommunal_ou_service_probable",
                    "tiers_probable", "devine_a_verifier")
 RETRY_STATUTS = {"erreur_acces", "robots_indisponible"}
+# securite_reseau.RAISON_NON_PUBLIQUE (« adresse_non_publique ») : refus anti-SSRF, traité comme erreur de page ou
+# d'accueil (erreur_acces) mais JAMAIS relancé : il ne figure ni dans RETRY_STATUTS ni dans TRANSIENT_MARKERS.
 # erreur_dns : sous forte charge le serveur DNS de la box échoue par intermittence (mesuré : 111 sites lus le 25/10
 # en erreur DNS le 28/10) ; une seconde tentative est donc faite comme pour les autres erreurs passagères.
 TRANSIENT_MARKERS = ("timeout", "erreur_connexion", "http_5xx", "bloque_ou_limite", "erreur_dns")
@@ -93,6 +103,15 @@ CHALLENGE_RE = re.compile(r"just a moment|attention required|checking your brows
 MENU_TAGS = {"nav", "header", "footer", "aside"}
 MENU_RE = re.compile(r"(^|[\s_-])(menu|nav|navbar|navigation|header|footer|sidebar|topbar|bandeau|masthead)([\s_-]|$)", re.I)
 TARGET_CODE_RE = re.compile(r"^/(\d{5}|2[AB]\d{3})(?:[-/]|$)", re.I)
+# Priorité des pages (reprise de l'ancien logiciel) : menu/bandeau > contenu avec mot-clé utile > autres contenus.
+# Comparaison de sous-chaînes sur chemin + texte du lien, sans accents et en minuscules.
+PRIORITY_KEYWORDS = ("demarche", "service", "environnement", "ecologie", "urbanisme", "habitat", "logement",
+                     "renovation", "energie", "transition", "climat", "eau", "dechet", "mobilite", "actualite",
+                     "info", "vie-pratique", "mairie", "contact", "question", "faq")
+# Adresses jamais lues (recherche, administration, agenda, flux, impressions, exports) : ni comptées, ni demandées.
+EXCLUDED_PATHS = ("/recherche", "/search", "?s=", "/wp-admin", "/login", "/connexion", "/panier", "/agenda/",
+                  "/calendrier", "/print", "/imprimer", "/feed", "/tag/", "/author/", "?xml=", "&xml=", "/demarches/part/")
+SCORE_FIXED_LOW = 21      # sitemap et sondes FALLBACK_PATHS : niveau 2 (contenu), profondeur 1
 
 LINK_FIELDS = ["code_insee", "nom_commune", "site_url", "page_url", "target_url", "href_origine", "texte_lien",
                "type_lien", "zone", "cible_commune", "confiance_site", "ssl_invalide", "date_controle"]
@@ -109,11 +128,30 @@ def norm_host(host: str | None) -> str:
 
 
 def is_target_url(url: str) -> bool:
+    """Lien vers le portail : http(s), hôte cible, port 80/443 (ou absent), sans identifiants dans l'URL."""
     try:
         p = urlsplit(url)
-        return p.scheme.lower() in ("http", "https") and norm_host(p.hostname) == TARGET_HOST
+        return (p.scheme.lower() in ("http", "https") and norm_host(p.hostname) == TARGET_HOST
+                and p.port in (None, 80, 443) and p.username is None and p.password is None)
     except ValueError:
         return False
+
+
+def sans_accents(texte: str) -> str:
+    """Minuscules sans accents (NFKD, marques diacritiques retirées)."""
+    decomposed = unicodedata.normalize("NFKD", texte)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+
+
+def link_priority(url: str, text: str, zone: str, depth: int) -> int:
+    """Score de visite (plus petit = plus tôt) : 10 pour un lien de menu/bandeau, 20 pour un contenu avec mot-clé
+    utile (adresse ou texte), 30 sinon ; la profondeur départage."""
+    if zone == "menu_ou_bandeau":
+        base = 1
+    else:
+        haystack = sans_accents(unquote(urlsplit(url).path)) + " " + sans_accents(text)
+        base = 2 if any(k in haystack for k in PRIORITY_KEYWORDS) else 3
+    return base * 10 + depth
 
 
 def normalize_internal(url: str) -> str:
@@ -187,6 +225,7 @@ def target_scope(target_url: str, code_insee: str) -> str:
 class PageData:
     links: list[dict] = field(default_factory=list)
     internal: list[str] = field(default_factory=list)
+    internal_meta: dict[str, tuple[str, str]] = field(default_factory=dict)   # adresse -> (texte, zone) des <a>/<area>
     platform_pages: list[str] = field(default_factory=list)   # pages PanneauPocket liées depuis la page
     invalid_hrefs: int = 0
     n_anchors: int = 0          # nombre de balises <a href> (diagnostic de l'accueil)
@@ -278,6 +317,10 @@ def parse_page(html: str, page_url: str, site_host: str, diagnose: bool = False)
             add_target(absolute, href, node.text(separator=" ", strip=True), "lien", link_zone(node))
         elif crawlable(absolute, site_host):
             norm = normalize_internal(absolute)
+            zone = link_zone(node)
+            prev = data.internal_meta.get(norm)
+            if prev is None or (zone == "menu_ou_bandeau" and prev[1] != "menu_ou_bandeau"):
+                data.internal_meta[norm] = (node.text(separator=" ", strip=True)[:200], zone)
             if norm not in seen_internal:
                 seen_internal.add(norm)
                 data.internal.append(norm)
@@ -382,23 +425,116 @@ def sitemap_locs(xml: str) -> list[str]:
 
 
 # ----------------------------------------------------------------- réseau
-class Throttle:
-    """Délai minimal entre deux requêtes vers un même site (surchargeable : Crawl-delay, ralentissement 429/503)."""
+RETRY_AFTER_MAX_S = 60.0   # Retry-After plafonné : au-delà, on n'attend pas plus (le site reste exploré)
+IP_PAR_HOTE: dict[str, str] = {}   # hôte -> première adresse résolue (rempli par resolve, vidé par crawl_all)
 
-    def __init__(self, delay: float):
+
+def _retry_after(valeur: str | None) -> float | None:
+    """Retry-After (secondes ou date HTTP) ; None si absent ou illisible."""
+    if not valeur:
+        return None
+    valeur = valeur.strip()
+    if valeur.isdigit():
+        return float(valeur)
+    try:
+        d = parsedate_to_datetime(valeur)
+    except (TypeError, ValueError):
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return max(0.0, (d - datetime.now(timezone.utc)).total_seconds())
+
+
+class Throttle:
+    """Délai minimal entre deux requêtes vers un même hôte, et plafond de requêtes simultanées par adresse IP.
+
+    Mode adaptatif (défaut) : délai courant = max(plancher `delay`, plancher imposé `per_host` (Crawl-delay, 429/503),
+    moyenne mobile EWMA α=0,3 du temps de réponse plafonnée à `delai_max`, Retry-After en cours, surplus d'échec).
+    Un échec (timeout, 5xx, erreur réseau) double le surplus (plafond `delai_max`) ; un succès le divise par deux.
+    Un 429/503 double le plancher `per_host` (comme avant) ; un succès restaure progressivement sa valeur antérieure.
+    Sans plancher (`delay` = 0, tests), les doublements ne produisent rien : pas de ralentissement artificiel.
+    Mode fixe (`adaptatif` False) : délai = `per_host` ou `delay`, sans EWMA ni surplus ni Retry-After."""
+
+    def __init__(self, delay: float, *, adaptatif: bool = True, delai_max: float = MAX_CRAWL_DELAY,
+                 requetes_par_ip: int = 4, horloge: Callable[[], float] | None = None):
         self.delay, self.per_host, self._locks, self._last = delay, {}, {}, {}
+        self.adaptatif, self.delai_max = adaptatif, delai_max
+        self.requetes_par_ip = max(1, requetes_par_ip)
+        self._horloge = horloge or (lambda: time.monotonic())
+        self._moyenne: dict[str, float] = {}         # EWMA du temps de réponse (succès uniquement)
+        self._surplus: dict[str, float] = {}         # surplus de délai après échec
+        self._avant_429: dict[str, float] = {}       # plancher per_host d'avant le premier 429/503 (restauré par succès)
+        self._retry: dict[str, tuple[float, float]] = {}  # hôte -> (fin, secondes) de Retry-After en cours
+        self._sem_ip: dict[str, asyncio.Semaphore] = {}
+
+    def _retry_actif(self, host: str) -> float:
+        e = self._retry.get(host)
+        if e is None:
+            return 0.0
+        if self._horloge() < e[0]:
+            return e[1]
+        del self._retry[host]
+        return 0.0
+
+    def delai(self, host: str) -> float:
+        """Délai minimal courant (secondes) entre deux requêtes vers `host`."""
+        imposé = self.per_host.get(host, self.delay)
+        if not self.adaptatif:
+            return imposé
+        ewma = min(self.delai_max, self._moyenne.get(host, 0.0))
+        return max(self.delay, imposé, ewma, self._retry_actif(host), self._surplus.get(host, 0.0))
 
     async def wait(self, host: str) -> None:
         lock = self._locks.setdefault(host, asyncio.Lock())
         async with lock:
-            d = self.per_host.get(host, self.delay)
-            gap = d - (time.monotonic() - self._last.get(host, -1e9))
+            gap = self.delai(host) - (self._horloge() - self._last.get(host, -1e9))
             if gap > 0:
                 await asyncio.sleep(gap)
-            self._last[host] = time.monotonic()
+            self._last[host] = self._horloge()
 
-    def slow_down(self, host: str) -> None:
-        self.per_host[host] = min(max(self.per_host.get(host, self.delay), 0.5) * 2, MAX_CRAWL_DELAY)
+    def slow_down(self, host: str, retry_after: float | None = None) -> None:
+        """429/503 : plancher doublé (plafond delai_max) ; Retry-After (plafonné) impose une attente."""
+        prec = self.per_host.get(host, self.delay)
+        if self.adaptatif:
+            self._avant_429.setdefault(host, prec)
+        self.per_host[host] = min(max(prec, 0.5) * 2, self.delai_max)
+        if self.adaptatif and retry_after is not None:
+            s = min(max(0.0, retry_after), RETRY_AFTER_MAX_S)
+            self._retry[host] = (self._horloge() + s, s)
+
+    def echec(self, host: str) -> None:
+        """Échec sans 429/503 (timeout, erreur réseau, 5xx) : surplus doublé. Sans plancher, rien à doubler."""
+        if not self.adaptatif:
+            return
+        courant = self.delai(host)
+        if courant > 0:
+            self._surplus[host] = min(self.delai_max, courant * 2)
+
+    def succes(self, host: str, duree: float) -> None:
+        """Réponse reçue sans erreur serveur : EWMA mise à jour, surplus et plancher 429 redescendent."""
+        if not self.adaptatif:
+            return
+        anc = self._moyenne.get(host)
+        self._moyenne[host] = duree if anc is None else 0.3 * duree + 0.7 * anc
+        if host in self._surplus:
+            moitie = self._surplus[host] / 2
+            if moitie < 0.05:
+                del self._surplus[host]
+            else:
+                self._surplus[host] = moitie
+        if host in self._avant_429:
+            prec = self._avant_429[host]
+            ecart = (self.per_host.get(host, prec) - prec) / 2
+            if ecart < 0.05:
+                del self._avant_429[host]
+                self.per_host[host] = prec
+            else:
+                self.per_host[host] = prec + ecart
+
+    def plafond_ip(self, host: str) -> asyncio.Semaphore:
+        """Sémaphore de l'adresse IP résolue de `host` (ou de l'hôte lui-même si non résolu)."""
+        cle = IP_PAR_HOTE.get(host, host)
+        return self._sem_ip.setdefault(cle, asyncio.Semaphore(self.requetes_par_ip))
 
 
 @dataclass
@@ -425,23 +561,38 @@ async def _fetch(client: httpx.AsyncClient, url: str, site_host: str, throttle: 
     def done(out: Fetched) -> Fetched:
         out.wait_s, out.nbytes = waited, nbytes
         return out
+    hote = site_host                                    # hôte de la requête en cours (mis à jour à chaque saut)
     try:
         for _ in range(max_redirects + 1):
+            if SECURITE["actif"]:                       # hôte non public (localhost, réseau privé…) : aucune requête
+                raison = await securite_reseau.verifier_hote(urlsplit(cur).hostname or "",
+                                                             resoudre=SECURITE["resoudre"])
+                if raison:
+                    return done(Fetched(None, cur, kind=raison, error=raison))
+            hote = norm_host(urlsplit(cur).hostname)
             t0 = time.monotonic()
             if m is not None:
                 m.waiting += 1
             try:
-                await throttle.wait(norm_host(urlsplit(cur).hostname))
+                await throttle.wait(hote)
             finally:
                 if m is not None:
                     m.waiting -= 1
             waited += time.monotonic() - t0
+            sem_ip = throttle.plafond_ip(hote)          # au plus requetes_par_ip_max requêtes simultanées par IP
+            await sem_ip.acquire()
             if m is not None:
                 m.inflight += 1
             try:
+                t_req = time.monotonic()
                 async with client.stream("GET", cur, **kw) as resp:
+                    duree = time.monotonic() - t_req
                     if resp.status_code in (429, 503):
-                        throttle.slow_down(site_host)                 # le serveur demande de ralentir : on obéit
+                        throttle.slow_down(hote, _retry_after(resp.headers.get("retry-after")))  # on obéit
+                    elif resp.status_code >= 500:
+                        throttle.echec(hote)
+                    else:
+                        throttle.succes(hote, duree)
                     if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
                         nxt = urljoin(cur, resp.headers["location"])
                         if norm_host(urlsplit(nxt).hostname) != site_host and not follow_external:
@@ -471,8 +622,10 @@ async def _fetch(client: httpx.AsyncClient, url: str, site_host: str, throttle: 
             finally:
                 if m is not None:
                     m.inflight -= 1
+                sem_ip.release()
         return done(Fetched(None, cur, kind="trop_de_redirections"))
     except Exception as exc:  # noqa: BLE001 - classée puis enregistrée
+        throttle.echec(hote)                            # timeout, erreur réseau, TLS : échec pour le délai adaptatif
         return done(Fetched(None, cur, kind=classify_status(None, exc), error=f"{type(exc).__name__}: {exc}"[:200]))
 
 
@@ -524,7 +677,7 @@ def new_row(site: dict, attempt: int = 1) -> dict:
 
 
 async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict, attempt: int = 1) -> SiteResult:
-    """Explore un site en largeur et S'ARRÊTE au premier lien trouvé."""
+    """Explore un site par priorité de page et S'ARRÊTE au premier lien trouvé."""
     secure, insecure = clients
     client = insecure if (site["ssl_invalide"] and insecure is not None) else secure
     started = time.monotonic()
@@ -575,8 +728,9 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
     async def body():
         nonlocal site_host
         moved = False
-        # Parcours en LARGEUR, sans priorité de contenu. Clé : (niveau, ordre d'arrivée, url, profondeur) ;
-        # niveau -1 = page où le lien avait déjà été vu lors d'un précédent passage.
+        # Parcours PRIORISÉ (menu/bandeau, puis contenu avec mot-clé, puis le reste ; à priorité égale, ordre d'arrivée).
+        # Clé : (score, ordre d'arrivée, url, profondeur) ; score -1 = page où le lien avait déjà été vu lors d'un
+        # précédent passage.
         heap: list[tuple[int, int, str, int]] = []
         tick = itertools.count()
         seen: set[tuple[str, str, str]] = set()        # identité de page (page_id) : /fr et /fr/ ne sont lues qu'une fois
@@ -585,17 +739,32 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
         probes: set[str] = set()                       # pages devinées : un échec n'est pas une erreur du site
         weak_done, sitemap_tried, accessible, mention = False, False, 0, ""
 
-        def push(url: str, depth: int, known: bool = False) -> None:
+        def push(url: str, depth: int, known: bool = False, meta: tuple[str, str] | None = None,
+                 fixed: int | None = None) -> None:
+            """meta = (texte, zone) du lien ; fixed = score imposé (sitemap, sondes). Accueil : score 0."""
             if page_id(url) in seen:
                 return
             seen.add(page_id(url))
+            if any(x in f"{urlsplit(url).path}?{urlsplit(url).query}".lower() for x in EXCLUDED_PATHS):
+                row["variantes_ignorees"] += 1          # recherche, administration, agenda… : jamais lu
+                return
             key = "" if known else trap_key(url)
             if key:
                 templates[key] = templates.get(key, 0) + 1
                 if templates[key] > TRAP_CAP:           # pagination / calendrier : variantes sans intérêt
                     row["variantes_ignorees"] += 1
                     return
-            heapq.heappush(heap, (-1 if known else depth, next(tick), url, depth))
+            if known:
+                score = -1
+            elif fixed is not None:
+                score = fixed
+            elif depth == 0:
+                score = 0
+            elif meta is not None:
+                score = link_priority(url, meta[0], meta[1], depth)
+            else:
+                score = 3 * 10 + depth
+            heapq.heappush(heap, (score, next(tick), url, depth))
 
         push(normalize_internal(start), 0)
         alternates = alternate_starts(start)
@@ -614,6 +783,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
             return False
 
         errors, first_error, sitemap_done = 0, "", not opts.get("use_sitemap", False)
+        last_kind, refus_accueil = "", False          # refus anti-SSRF de l'accueil : reste le motif même si un repli échoue
         while heap:
             if row["pages_visitees"] >= opts["max_pages"]:
                 row["limite_pages_atteinte"] = 1
@@ -623,6 +793,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
             if rstate == "indisponible":
                 if depth == 0:
                     first_error = first_error or f"{url} -> robots {rkind} {rstatus or ''}".strip()
+                    refus_accueil = refus_accueil or rkind == securite_reseau.RAISON_NON_PUBLIQUE
                     if next_alternate(url):
                         continue
                     if rstatus is not None:
@@ -630,7 +801,8 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                                    motif=f"robots.txt injoignable (HTTP {rstatus}) : pas d'exploration")
                     else:
                         errors += 1
-                        row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {rkind}",
+                        kind = securite_reseau.RAISON_NON_PUBLIQUE if refus_accueil else rkind
+                        row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {kind}",
                                    erreur=first_error[:200], pages_en_erreur=errors)
                     return
                 # Robots indisponible sur une autre origine : page non lue, comptée comme erreur du site.
@@ -675,13 +847,13 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                     return
                 if depth < opts["max_depth"]:
                     for nxt in data.internal:
-                        push(nxt, depth + 1)
+                        push(nxt, depth + 1, meta=data.internal_meta.get(nxt))
                 elif any(page_id(n) not in seen for n in data.internal):
                     row["limite_profondeur_atteinte"] = 1
                 if depth == 0 and not sitemap_done and opts["max_depth"] >= 1:
                     sitemap_done = sitemap_tried = True
                     for nxt in await sitemap_candidates(get, start, rp, site_host, SITEMAP_SEEDS):
-                        push(nxt, 1)
+                        push(nxt, 1, fixed=SCORE_FIXED_LOW)
                 here = normalize_internal(res.final_url or url)
                 if depth == 0 and not weak_done and opts["max_depth"] >= 1 and all(page_id(u) == page_id(here) for u in data.internal):
                     # Accueil sans AUCUN autre lien interne : page JavaScript, protection anti-robot ou site d'une
@@ -692,12 +864,12 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                     if not sitemap_tried:
                         sitemap_tried = True
                         for nxt in await sitemap_candidates(get, start, rp, site_host, SITEMAP_SEEDS):
-                            push(nxt, 1)
+                            push(nxt, 1, fixed=SCORE_FIXED_LOW)
                     origin = "{0.scheme}://{0.netloc}".format(urlsplit(res.final_url or url))
                     for path in FALLBACK_PATHS:
                         probe = normalize_internal(origin + path)
                         probes.add(probe)
-                        push(probe, 1)
+                        push(probe, 1, fixed=SCORE_FIXED_LOW)
             elif url in probes:                                        # sonde sans réponse ou non HTML : sans conséquence
                 row["pages_visitees"] -= 1
             elif res.kind == "non_html" and depth > 0:                 # page non HTML hors accueil : ignorée
@@ -706,6 +878,7 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                 first_error = first_error or f"{url} -> {res.kind} {res.status or ''} {res.error}".strip()
                 if depth == 0:
                     last_kind = res.kind
+                    refus_accueil = refus_accueil or res.kind == securite_reseau.RAISON_NON_PUBLIQUE
                     if res.kind == "redirection_externe" and not moved and res.final_url:
                         moved = True                                   # site déménagé (ex. beauvais.fr -> beauvaisis.fr)
                         new = normalize_internal(res.final_url)
@@ -721,7 +894,8 @@ async def crawl_site(site: dict, clients: tuple, throttle: Throttle, opts: dict,
                     if next_alternate(url):                            # repli : racine, www, http/https
                         continue
                     errors += 1
-                    row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {last_kind}",
+                    kind = securite_reseau.RAISON_NON_PUBLIQUE if refus_accueil else last_kind
+                    row.update(statut_crawl="erreur_acces", motif=f"page d'accueil : {kind}",
                                erreur=first_error[:200], pages_en_erreur=errors)
                     return
                 errors += 1
@@ -787,7 +961,9 @@ async def resolve(host: str, timeout: float = 5.0) -> str:
     """'' si le nom se résout, sinon le motif de l'échec (code d'erreur Windows compris : 11001 = nom inexistant,
     11002 = échec temporaire du serveur DNS)."""
     try:
-        await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM), timeout)
+        infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM), timeout)
+        if infos:                                            # adresse retenue pour le plafond par IP (hébergeurs mutualisés)
+            IP_PAR_HOTE[norm_host(host)] = str(infos[0][4][0])
         return ""
     except asyncio.TimeoutError:
         return "délai de résolution dépassé"
@@ -858,6 +1034,9 @@ async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None,
                     on_metrics=None) -> list[SiteResult]:
     """File de sites traitée par `concurrency` tâches asyncio. Plafond de sites simultanés par domaine d'hébergement."""
     tune_runtime(opts["concurrency"])
+    # Anti-SSRF : actif hors transport simulé (les noms de test ne se résolvent pas), sauf opts["verif_ip"] explicite.
+    SECURITE.update(actif=bool(opts.get("verif_ip", transport is None)), resoudre=opts.get("resoudre_hote"))
+    securite_reseau.vider_cache()
     # resolve() passe par l'exécuteur par défaut de la boucle (getaddrinfo asyncio), pas par le limiteur anyio : on le
     # dimensionne d'après le nombre de résolutions simultanées autorisées, sans quoi elles font la queue (timeouts).
     asyncio.get_running_loop().set_default_executor(
@@ -866,7 +1045,10 @@ async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None,
     limits = httpx.Limits(max_connections=opts["concurrency"] * 2 + 10, max_keepalive_connections=opts["concurrency"])
     kw = dict(follow_redirects=False, timeout=opts["timeout"], transport=transport, limits=limits,
               headers={"User-Agent": ua, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"})
-    throttle = Throttle(opts["host_delay"])
+    IP_PAR_HOTE.clear()
+    throttle = Throttle(opts["host_delay"], adaptatif=bool(opts.get("adaptive_delay", True)),
+                        delai_max=float(opts.get("delai_max", MAX_CRAWL_DELAY)),
+                        requetes_par_ip=int(opts.get("requetes_par_ip_max", 4)))
     todo: asyncio.Queue = asyncio.Queue()
     for s in sites:
         todo.put_nowait(s)
@@ -940,6 +1122,7 @@ async def crawl_all(sites: list[dict], opts: dict, transport=None, on_done=None,
         if metrics is not None:
             on_metrics(metrics.snapshot())
             METRICS = None
+        SECURITE.update(actif=False, resoudre=None)
         await secure.aclose()
         if insecure is not None:
             await insecure.aclose()
@@ -1064,7 +1247,7 @@ def summarize(site_rows: list[dict], link_rows: list[dict], params: dict, checke
             "L'exploration s'arrête au premier lien trouvé : un site « lien_trouve » n'est pas lu en entier (choix).",
             "Pour un site sans lien trouvé, seules les pages atteignables dans les limites de profondeur et de pages sont "
             "lues : « aucun lien » ne signifie pas « absent » si le site est en statut explore_partiel.",
-            "Parcours en largeur sans priorité de contenu : les pages sont lues dans l'ordre où elles apparaissent.",
+            "Parcours priorisé : menus et bandeaux, puis contenus à mot-clé utile (démarches, environnement, contact…), puis le reste ; à priorité égale, dans l'ordre d'apparition.",
             "Sites JavaScript (rendu côté client) : liens non vus s'ils ne figurent pas dans le code de la page (pas de navigateur) ; l'accueil vide est signalé dans accueil_diag.",
             "Les redirections ou raccourcisseurs menant au site cible ne sont pas suivis.",
             "Sites à certificat invalide explorés sans vérification du certificat (ssl_invalide=1) : contenu non authentifié.",
@@ -1203,6 +1386,8 @@ def run_many(paths_list: list[DeptPaths], args, on_dept_done=None) -> int:
             "max_par_domaine": getattr(args, "max_par_domaine", 4),
             "max_per_process": getattr(args, "max_par_processus", MAX_PER_PROCESS),
             "dns_simultanees": getattr(args, "dns_simultanees", 48),
+            "adaptive_delay": getattr(args, "adaptive_delay", True), "delai_max": getattr(args, "delai_max", 10.0),
+            "requetes_par_ip_max": getattr(args, "requetes_par_ip_max", 4),
             "metrics_interval": getattr(args, "metrics_interval", 10.0)}
     perf_path = None
     on_metrics = None

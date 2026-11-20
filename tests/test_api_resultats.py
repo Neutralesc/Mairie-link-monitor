@@ -114,12 +114,12 @@ class ApiResultatsPostgresTests(ServeurApi, sp.PgSchemaTestCase):
         self.assertNotIn("<h1>Résultats</h1>", corps)
         self.assertNotIn(MOT_DE_PASSE, corps)
 
-    def test_accueil_avec_basic_navigation_analyses_active(self):
+    def test_accueil_avec_basic_navigation_accueil_active(self):
         status, _, corps = self.appel("/", auth=MOT_DE_PASSE)
         self.assertEqual(status, 200)
-        self.assertIn('href="/" target="_self" aria-current="page">Analyses</a>', corps)
+        self.assertIn('href="/" target="_self" aria-current="page">Accueil</a>', corps)
         self.assertIn('href="/resultats" target="_self">Résultats</a>', corps)
-        self.assertIn("Résultats par département", corps)
+        self.assertIn("Résultats publiés", corps)
 
 
 class ApiResultatsBasePanneTests(ServeurApi):

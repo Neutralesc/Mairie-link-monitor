@@ -137,6 +137,16 @@ class ActionsRunner:
         return row["debut"].timestamp()
 
     @property
+    def analysis_id(self) -> int | None:
+        """Identifiant de l'analyse courante (active ou la plus récente), None s'il n'y en a pas ou si la base est en panne."""
+        try:
+            row = self._lire()
+        except Exception as exc:
+            self._avertir("analysis_id", exc)
+            return None
+        return None if row is None else row.get("id")
+
+    @property
     def label(self) -> str:
         try:
             row = self._lire()

@@ -14,6 +14,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from publications import CSV_TOUS, Publication, PublicationSource, trier_liens
+from synthese import resume as resume_synthese
 
 if TYPE_CHECKING:  # pragma: no cover
     import psycopg
@@ -29,9 +30,13 @@ CREATE TABLE IF NOT EXISTS publications (
     csv_present BOOLEAN NOT NULL DEFAULT FALSE,
     resume_changements TEXT NOT NULL DEFAULT '',
     liens_json TEXT NOT NULL DEFAULT '[]',
+    synthese_json TEXT NOT NULL DEFAULT '{}',
+    resume_json TEXT NOT NULL DEFAULT '{}',
     publie_le TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE publications ADD COLUMN IF NOT EXISTS liens_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE publications ADD COLUMN IF NOT EXISTS synthese_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE publications ADD COLUMN IF NOT EXISTS resume_json TEXT NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS publication_globale (
     nom TEXT PRIMARY KEY,
     contenu BYTEA NOT NULL,
@@ -55,8 +60,8 @@ CONNECT_TIMEOUT_S = 5  # délai de connexion : une base injoignable ne bloque pa
 
 _UPSERT_DEPT = """
 INSERT INTO publications (dept, controle_date, communes, avec_lien, report_html, csv_bytes, csv_present,
-                          resume_changements, liens_json, publie_le)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                          resume_changements, liens_json, synthese_json, resume_json, publie_le)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (dept) DO UPDATE SET
     controle_date = EXCLUDED.controle_date,
     communes = EXCLUDED.communes,
@@ -66,6 +71,8 @@ ON CONFLICT (dept) DO UPDATE SET
     csv_present = EXCLUDED.csv_present,
     resume_changements = EXCLUDED.resume_changements,
     liens_json = EXCLUDED.liens_json,
+    synthese_json = EXCLUDED.synthese_json,
+    resume_json = EXCLUDED.resume_json,
     publie_le = now()
 """
 
@@ -112,9 +119,13 @@ def publish(source: PublicationSource, conn, only: list[str] | None = None) -> d
             continue
         liens_json = json.dumps([{"code_insee": r["code_insee"], "nom_commune": r["nom_commune"],
                                   "url_page": r["url_page"]} for r in source.liens(dept)], ensure_ascii=False)
+        synth = source.synthese(dept)
+        synthese_json = json.dumps(synth, ensure_ascii=False) if synth is not None else "{}"
+        resume_json = json.dumps(resume_synthese(synth), ensure_ascii=False) if synth is not None else "{}"
         try:
             conn.execute(_UPSERT_DEPT, (pub.dept, pub.controle_date, pub.communes, pub.avec_lien, pub.report_html,
-                                        pub.csv_bytes, pub.csv_present, pub.resume_changements, liens_json))
+                                        pub.csv_bytes, pub.csv_present, pub.resume_changements, liens_json,
+                                        synthese_json, resume_json))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -230,6 +241,57 @@ class PostgresSource:
             row = conn.execute("SELECT EXISTS(SELECT 1 FROM publication_globale WHERE nom = %s)", (CSV_TOUS,)).fetchone()
         return bool(row[0])
 
+    def synthese(self, dept: str) -> dict | None:
+        """Synthèse publiée du département ; None si absente, vide ou JSON invalide."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT synthese_json FROM publications WHERE dept = %s", (dept,)).fetchone()
+        return None if row is None else _objet_json(row[0])
+
+    def resumes(self) -> list[dict]:
+        """Un résumé par département publié, lu en une seule requête (pas de synthèse complète). Trié par code."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT dept, resume_json FROM publications ORDER BY dept").fetchall()
+        sortie: list[dict] = []
+        for dept, brut in rows:
+            resume = _objet_json(brut)
+            if resume is not None:
+                resume.setdefault("code", dept)
+                sortie.append(resume)
+        return sorted(sortie, key=lambda r: r["code"])
+
+    def analyses(self, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            lignes = analysis_list(conn, int(limit))
+        return [_analyse_publique(ligne) for ligne in lignes]
+
+    def analyse(self, analysis_id: int) -> dict | None:
+        with self._connect() as conn:
+            brut = analysis_get(conn, int(analysis_id))
+        if brut is None:
+            return None
+        ligne = {**brut, "departements": _liste_departements(brut.get("departements"))}
+        return {**_analyse_publique(ligne), "journal": brut.get("journal") or ""}
+
+
+def _objet_json(brut) -> dict | None:
+    """Objet JSON non vide ; None pour '{}', une valeur non objet ou un JSON invalide."""
+    try:
+        valeur = json.loads(brut)
+    except (TypeError, ValueError):
+        return None
+    return valeur if isinstance(valeur, dict) and valeur else None
+
+
+def _liste_departements(texte: str | None) -> list[str]:
+    return [d for d in (texte or "").split(",") if d]
+
+
+def _analyse_publique(ligne: dict) -> dict:
+    """Forme publique d'une analyse : id, statut, departements (liste), debut et fin en ISO (fin None si en cours)."""
+    debut, fin = ligne.get("debut"), ligne.get("fin")
+    return {"id": int(ligne["id"]), "statut": ligne["statut"], "departements": list(ligne["departements"]),
+            "debut": debut.isoformat() if debut else "", "fin": fin.isoformat() if fin else None}
+
 
 # ----------------------------------------------------------------- suivi des analyses
 
@@ -317,6 +379,19 @@ def analysis_get(conn, analysis_id: int) -> dict | None:
     names = [d.name for d in cur.description]
     conn.commit()
     return None if row is None else dict(zip(names, row))
+
+
+def analysis_list(conn, limit: int = 50) -> list[dict]:
+    """Analyses du plus récent au plus ancien, sans le journal ; `departements` converti en liste."""
+    cur = conn.execute(
+        "SELECT id, departements, reprise, statut, debut, fin, run_id FROM analyses "
+        "ORDER BY debut DESC, id DESC LIMIT %s",
+        (int(limit),),
+    )
+    names = [d.name for d in cur.description]
+    rows = cur.fetchall()
+    conn.commit()
+    return [{**dict(zip(names, row)), "departements": _liste_departements(row[1])} for row in rows]
 
 
 def analysis_current(conn) -> dict | None:

@@ -17,6 +17,8 @@ import history
 import report as report_module
 import results
 from layout import DeptPaths
+from synthese import resume as resume_synthese
+from synthese import synthese_departement
 
 DEPT_RE = re.compile(r"^(\d{2,3}|2[AB])$")
 CSV_TOUS = "liens_tous_departements.csv"
@@ -57,6 +59,12 @@ class PublicationSource(Protocol):
     def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None: ...
     def csv_all(self) -> bytes | None: ...               # liens_tous_departements.csv, None s'il n'existe pas
     def has_csv_all(self) -> bool: ...                   # existence du CSV global, sans en lire le contenu
+    # synthèse par commune au format de l'ancien logiciel (synthese.synthese_departement) ; None si indisponible
+    def synthese(self, dept: str) -> dict | None: ...
+    def resumes(self) -> list[dict]: ...                 # un synthese.resume par département publié, trié par code
+    # suivi des analyses : [{id, statut, departements, debut, fin}] du plus récent au plus ancien
+    def analyses(self, limit: int = 50) -> list[dict]: ...
+    def analyse(self, analysis_id: int) -> dict | None: ...  # + "journal" ; None si inconnue
 
 
 class FileSource:
@@ -114,3 +122,23 @@ class FileSource:
 
     def has_csv_all(self) -> bool:
         return (self.root / "resultats" / CSV_TOUS).exists()
+
+    def synthese(self, dept: str) -> dict | None:
+        if dept not in self.depts():
+            return None
+        return synthese_departement(DeptPaths(self.root, dept), history.db_path(self.root))
+
+    def resumes(self) -> list[dict]:
+        db = history.db_path(self.root)
+        sortie = []
+        for d in self.depts():
+            synth = synthese_departement(DeptPaths(self.root, d), db)
+            if synth is not None:
+                sortie.append(resume_synthese(synth))
+        return sorted(sortie, key=lambda r: r["code"])
+
+    def analyses(self, limit: int = 50) -> list[dict]:
+        return []                       # pas de suivi des analyses hors base : le lancement passe par Postgres
+
+    def analyse(self, analysis_id: int) -> dict | None:
+        return None
