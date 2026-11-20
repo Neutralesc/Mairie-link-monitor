@@ -2,6 +2,7 @@
 {% block titre %}{{ synth.departement.nom }} ({{ synth.departement.code }}){% endblock %}
 {% block date_publication %}Date de la dernière publication de ce département : {{ (synth.campagne.fin or synth.campagne.debut or 'non renseignée')|date }}.{% endblock %}
 {% block contenu %}
-<p><a class="fr-link" href="/">Retour à la liste des départements</a></p>
+<p><a class="fr-link" href="{{ retour[0] }}">{{ retour[1] }}</a></p>
+{% if url_html %}<p class="fr-mb-3w"><a class="fr-btn" href="{{ url_html }}">Télécharger le compte rendu (HTML)</a></p>{% endif %}
 {% include 'web/_compte_rendu.html.j2' %}
 {% endblock %}

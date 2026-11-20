@@ -38,7 +38,15 @@
       <div class="fr-container">
         <button class="fr-btn--close fr-btn" aria-controls="modal-menu" title="Fermer">Fermer</button>
         <nav class="fr-nav" id="nav" role="navigation" aria-label="Menu principal"><ul class="fr-nav__list">
-          {% set entrees = [('accueil','/','Accueil'),('tableau-de-bord','/tableau-de-bord','Tableau de bord'),('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi'),('rapports','/rapports','Rapports'),('resultats','/resultats','Résultats'),('campagnes','/campagnes','Historique'),('apropos','/a-propos','À propos')] if admin else [('accueil','/','Résultats'),('apropos','/a-propos','À propos'),('reserve','/analyse','Espace réservé')] %}
+          {# Pages assainies (sans_exploitation) : aucun lien d'exploitation, même pour l'administrateur #}
+          {% if admin %}
+            {% set entrees = [('accueil','/','Accueil'),('rapports','/rapports','Rapports'),('resultats','/resultats','Résultats'),('campagnes','/campagnes','Historique'),('apropos','/a-propos','À propos')] %}
+            {% if not sans_exploitation %}{% set entrees = entrees + [('tableau-de-bord','/tableau-de-bord','Tableau de bord'),('analyse','/analyse','Analyse'),('suivi','/suivi','Suivi')] %}{% endif %}
+            {% set entrees = entrees + [('admin-campagnes','/admin/campagnes','Campagnes (administration)')] %}
+          {% else %}
+            {% set entrees = [('accueil','/','Résultats'),('rapports','/rapports','Rapports'),('campagnes','/campagnes','Historique'),('apropos','/a-propos','À propos')] %}
+            {% if not sans_exploitation %}{% set entrees = entrees + [('reserve','/analyse','Espace réservé')] %}{% endif %}
+          {% endif %}
           {% for cle, url, nom in entrees %}
           <li class="fr-nav__item"><a class="fr-nav__link" href="{{ url }}" target="_self"{% if actif == cle %} aria-current="page"{% endif %}>{{ nom }}</a></li>
           {% endfor %}

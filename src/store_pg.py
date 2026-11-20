@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 from datetime import datetime
 
-from publications import (CSV_TOUS, Publication, PublicationSource, liens_confirmes, selection_liens,
-                          trier_liens)
+from publications import (CSV_TOUS, Publication, PublicationSource, liens_confirmes, selection_communes,
+                          selection_nouveaux, trier_liens)
 from synthese import resume as resume_synthese
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -304,21 +304,19 @@ class PostgresSource:
         return lignes
 
     def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
-        """Une ligne par lien confirmé, filtrée (q, dept), triée, paginée en mémoire sur le cache court."""
-        return selection_liens(self._liens_confirmes(dept), q, limit, offset)
+        """Communes à lien confirmé, filtrées (q, dept), triées, paginées en communes sur le cache court."""
+        return selection_communes(self._liens_confirmes(dept), q, limit, offset)
 
     def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]:
-        """Liens nouveaux depuis `depuis`, plus récents d'abord : LIMIT/OFFSET et COUNT côté base (index partiel)."""
+        """Communes ayant un lien nouveau depuis `depuis`. Les liens de la fenêtre sont lus d'un coup (index partiel) puis
+        regroupés par commune ; la fenêtre est courte, donc le volume reste modeste."""
         with self._connect() as conn:
             lignes = conn.execute(
                 "SELECT departement, code_insee, commune, url_page_source, url_cible, premiere_vue FROM liens_vus "
-                "WHERE nouveau AND premiere_vue >= %s "
-                "ORDER BY premiere_vue DESC, departement, commune, code_insee, url_page_source, url_cible LIMIT %s",
-                (depuis, int(limit))).fetchall()
-            total = conn.execute("SELECT count(*) FROM liens_vus WHERE nouveau AND premiere_vue >= %s",
-                                 (depuis,)).fetchone()[0]
-        return [{"dept": r[0], "code_insee": r[1], "nom_commune": r[2], "url_page_source": r[3], "url_cible": r[4],
-                 "premiere_vue": r[5].isoformat(), "nouveau": True} for r in lignes], int(total)
+                "WHERE nouveau AND premiere_vue >= %s", (depuis,)).fetchall()
+        return selection_nouveaux([{"dept": r[0], "code_insee": r[1], "nom_commune": r[2], "url_page_source": r[3],
+                                    "url_cible": r[4], "premiere_vue": r[5].isoformat(), "nouveau": True}
+                                   for r in lignes], depuis, limit)
 
     def csv_all(self) -> bytes | None:
         with self._connect() as conn:

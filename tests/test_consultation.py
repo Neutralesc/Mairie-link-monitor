@@ -23,11 +23,17 @@ from layout import DeptPaths  # noqa: E402
 from publications import FileSource, SourceIndisponible  # noqa: E402
 
 MOT_DE_PASSE = "mot-de-passe-lecture-test-4b2f"
-PUBLIQUES = ("/", "/a-propos", "/departement/60", "/departement/60.csv")
-PROTEGEES = ("/analyse", "/suivi", "/api/etat", "/campagnes", "/campagnes/1", "/rapports", "/rapports/60",
-             "/resultats", "/rapport/60", "/csv/60", "/csv/tous", "/lancer", "/reprendre/1", "/arreter", "/tableau-de-bord",
-             "/inconnu", "/a-propos/", "/departement/60/x", "/departement/60.json", "/departement/abcd")
+PUBLIQUES = ("/", "/a-propos", "/departement/60", "/departement/60.csv", "/rapports", "/rapports/60",
+             "/rapports/60/communes.csv", "/rapports/60/export.html", "/campagnes")
+# Protégées même avec la lecture publique : lancement, suivi, administration (/admin/...), formes non listées.
+PROTEGEES = ("/analyse", "/suivi", "/api/etat", "/admin/campagnes", "/admin/campagnes/1", "/admin/rapports/60",
+             "/resultats", "/csv/60", "/csv/tous", "/lancer", "/reprendre/1", "/arreter", "/tableau-de-bord",
+             "/inconnu", "/a-propos/", "/departement/60/x", "/departement/60.json", "/departement/abcd",
+             "/rapports/60/", "/rapports/60/x", "/rapports/60.csv", "/rapports/60/export.json", "/rapports/abcd",
+             "/rapport/60/x", "/campagnes/1/x", "/campagnes/1234567890", "/campagnes/1.json", "/campagnes/-1")
 MENU_ADMIN = ('href="/suivi"', 'href="/rapports"', 'href="/campagnes"')
+MENU_EXPLOITATION = ('href="/suivi"', 'href="/analyse"', 'href="/tableau-de-bord"', 'href="/admin/campagnes"',
+                     'href="/api/etat"')
 MENTION = ("Résultats générés automatiquement à partir de pages publiques ; une absence de lien peut venir d'un site "
            "inaccessible ou d'un lien non détecté.")
 FORMULES = ("=", "+", "-", "@", "\t", "\r")
@@ -136,10 +142,20 @@ class LectureDesactivee(ServeurLecture):
         self.assertIn("Lancer une analyse", self.html("/tableau-de-bord", auth=MOT_DE_PASSE))
 
     def test_pages_publiques_ne_s_ouvrent_pas(self):
-        for chemin in ("/a-propos", "/departement/60", "/departement/60.csv"):
+        for chemin in ("/a-propos", "/departement/60", "/departement/60.csv", "/rapports", "/rapports/60",
+                       "/rapports/60/communes.csv", "/rapports/60/export.html", "/rapport/60", "/campagnes"):
             with self.subTest(chemin=chemin):
                 self.assertEqual(self.appel("GET", chemin)[0], 401)
-                self.assertEqual(self.appel("GET", chemin, auth=MOT_DE_PASSE)[0], 404)
+        self.assertEqual(self.appel("GET", "/departement/60", auth=MOT_DE_PASSE)[0], 404)  # hors liste : comme avant
+
+    def test_rapports_et_campagnes_gardent_la_vue_administrateur(self):
+        # Sans lecture publique, /rapports et /campagnes restent les vues d'administration complètes.
+        self.assertIn("Détails techniques", self.html("/rapports/60", auth=MOT_DE_PASSE))
+        self.assertIn('href="/rapports/60"', self.html("/rapports", auth=MOT_DE_PASSE))
+        self.assertIn("Aucune analyse pour le moment.", self.html("/campagnes", auth=MOT_DE_PASSE))
+        self.assertEqual(self.appel("GET", "/admin/rapports/60", auth=MOT_DE_PASSE)[0], 200)
+        self.assertEqual(self.appel("GET", "/admin/campagnes", auth=MOT_DE_PASSE)[0], 200)
+        self.assertEqual(self.appel("GET", "/admin/campagnes", auth="mauvais")[0], 401)
 
     def test_post_sur_racine_toujours_protege(self):
         self.assertEqual(self.appel("POST", "/", origine=True, corps=b"dept=60")[0], 401)
@@ -191,13 +207,16 @@ class ContratLecture:
         self.assertIn(MENTION, html)
         self.assertIn("Résultats", html)
         self.assertRegex(html, r'href="/analyse"[^>]*>Espace réservé</a>')
-        for lien in MENU_ADMIN:
-            self.assertNotIn(lien, html)
+        for lien in MENU_EXPLOITATION:
+            if lien != 'href="/analyse"':  # « Espace réservé » : contrat existant de l'accueil visiteur
+                self.assertNotIn(lien, html)
+        self.assertIn('href="/rapports"', html)            # rapports et historique : publics, dans le menu visiteur
+        self.assertIn('href="/campagnes"', html)
         self.assertNotIn("Lancer une analyse", html)
         self.assertNotIn("Analyse en cours", html)
 
     def test_liens_et_formulaires_visiteur(self):
-        for chemin in ("/", "/a-propos", "/departement/60"):
+        for chemin in ("/", "/a-propos", "/departement/60", "/rapports", "/rapports/60", "/campagnes"):
             with self.subTest(chemin=chemin):
                 html = self.html(chemin)
                 self.assertNotIn('<form method="post"', html.lower())
@@ -205,9 +224,16 @@ class ContratLecture:
                     self.assertFalse(valeur.startswith("javascript:"), valeur)
                     if valeur.startswith("/"):
                         chemin_seul = valeur.split("#")[0].split("?")[0]  # ancre et filtres : même route publique
-                        self.assertTrue(chemin_seul in ("/", "/a-propos", "/analyse", "/resultats.csv")
-                                        or chemin_seul.startswith(("/departement/", "/static/")), valeur)
-                self.assertEqual(attributs_href_action(html).count("/analyse"), 1)  # Espace réservé, une seule fois
+                        self.assertTrue(chemin_seul in ("/", "/a-propos", "/analyse", "/resultats.csv", "/rapports",
+                                                        "/campagnes")
+                                        or chemin_seul.startswith(("/departement/", "/rapports/", "/campagnes/",
+                                                                   "/static/")), valeur)
+                if chemin in ("/", "/a-propos", "/departement/60"):
+                    self.assertEqual(attributs_href_action(html).count("/analyse"), 1)  # Espace réservé, une seule fois
+                else:
+                    self.assertNotIn("/analyse", attributs_href_action(html))  # pages assainies : aucun lien d'exploitation
+                    for valeur in MENU_EXPLOITATION:
+                        self.assertNotIn(valeur, html)
 
     def test_identifiants_valides_menu_complet(self):
         html = self.html("/", auth=MOT_DE_PASSE)
@@ -238,7 +264,8 @@ class ContratLecture:
                 self.assertEqual(self.appel("GET", "/departement/60.csv", brut_auth=brut)[0], 200)
 
     def test_en_tetes_noindex_et_cache_vary(self):
-        for chemin in ("/", "/a-propos", "/departement/60", "/departement/99"):
+        for chemin in ("/", "/a-propos", "/departement/60", "/departement/99", "/rapports", "/rapports/60",
+                       "/rapports/60/communes.csv", "/rapports/60/export.html", "/campagnes", "/campagnes/1"):
             with self.subTest(chemin=chemin):
                 statut, en_tetes, corps = self.appel("GET", chemin)
                 self.assertEqual(en_tetes.get("X-Robots-Tag"), "noindex, nofollow")
@@ -247,18 +274,19 @@ class ContratLecture:
                 self.assertIsNone(en_tetes.get("Set-Cookie"))
                 self.assertEqual(en_tetes.get("X-Content-Type-Options"), "nosniff")
                 self.assertIn("frame-ancestors 'none'", en_tetes.get("Content-Security-Policy", ""))
-                if statut == 200:
+                if statut == 200 and chemin != "/rapports/60/export.html" and "text/html" in en_tetes.get("Content-Type", ""):
                     self.assertIn('<meta name="robots" content="noindex,nofollow">', corps)
 
     def test_mentions_obligatoires_sur_chaque_page_publique(self):
-        for chemin in ("/", "/a-propos", "/departement/60"):
+        for chemin in ("/", "/a-propos", "/departement/60", "/rapports", "/rapports/60", "/campagnes"):
             with self.subTest(chemin=chemin):
                 html = self.html(chemin)
                 self.assertIn(MENTION, html)
                 self.assertIn("Date de la dernière publication", html)
 
     def test_une_seule_titre_1_par_page(self):
-        for chemin in ("/", "/a-propos", "/departement/60", "/departement/99"):
+        for chemin in ("/", "/a-propos", "/departement/60", "/departement/99", "/rapports", "/rapports/60", "/campagnes",
+                       "/campagnes/1"):
             with self.subTest(chemin=chemin):
                 self.assertEqual(len(re.findall(r"<h1[\s>]", self.appel("GET", chemin)[2])), 1)
 
@@ -382,7 +410,8 @@ class LecturePanne(ServeurLecture):
         return PanneSource(self.root)
 
     def test_pages_de_donnees_503_sans_detail_technique(self):
-        for chemin in ("/", "/departement/60", "/departement/60.csv"):
+        for chemin in ("/", "/departement/60", "/departement/60.csv", "/rapports", "/rapports/60",
+                       "/rapports/60/communes.csv", "/rapports/60/export.html", "/campagnes"):
             with self.subTest(chemin=chemin):
                 statut, en_tetes, corps = self.appel("GET", chemin)
                 self.assertEqual(statut, 503)
@@ -404,6 +433,172 @@ class LecturePanne(ServeurLecture):
         statut, _, corps = self.appel("GET", "/tableau-de-bord", auth=MOT_DE_PASSE)
         self.assertEqual(statut, 200)
         self.assertIn("Base de données indisponible", corps)
+
+
+def principal(html: str) -> str:
+    """Contenu de <main> : la partie qui doit être identique pour un visiteur et un administrateur."""
+    return html[html.index("<main"):html.index("</main>")]
+
+
+class LectureRapports(ServeurLecture):
+    """Rapports publics : vue assainie identique pour tous, CSV et export autonome, ancienne adresse redirigée."""
+
+    lecture = True
+
+    def test_liste_des_rapports(self):
+        html = self.html("/rapports")
+        self.assertIn("<h1>Rapports par département</h1>", html)
+        self.assertIn("<caption>", html)
+        self.assertIn('<th scope="col">Département</th>', html)
+        self.assertIn('href="/rapports/60"', html)
+        self.assertIn('href="/rapports/60/communes.csv"', html)
+        self.assertIn('href="/rapports/60/export.html"', html)
+        self.assertNotIn("Détails techniques", html)
+
+    def test_rapport_sans_details_techniques_ni_liens_d_exploitation(self):
+        html = self.html("/rapports/60")
+        self.assertIn("<h1>Oise (60)</h1>", html)
+        self.assertIn("Télécharger la liste des communes (CSV)", html)
+        self.assertIn("Télécharger le compte rendu (HTML)", html)
+        self.assertIn("Retour à la liste des rapports", html)
+        for absent in ("Détails techniques", "Liens écartés", "Valeurs brutes", "Télécharger (HTML)"):
+            self.assertNotIn(absent, html)
+        for valeur in attributs_href_action(html):
+            self.assertNotIn(valeur.split("?")[0], ("/analyse", "/suivi", "/arreter", "/reprendre", "/api/etat",
+                                                    "/tableau-de-bord", "/admin/rapports/60"), valeur)
+
+    def test_rapport_identique_pour_l_administrateur(self):
+        # Une seule vue par URL : seul le menu change pour l'administrateur (lien vers l'administration des campagnes).
+        self.assertEqual(principal(self.html("/rapports/60")), principal(self.html("/rapports/60", auth=MOT_DE_PASSE)))
+        menu = self.html("/rapports/60", auth=MOT_DE_PASSE)
+        self.assertIn('href="/admin/campagnes"', menu)
+        self.assertNotIn('href="/suivi"', menu)
+
+    def test_csv_et_export_autonome_assainis(self):
+        statut, en_tetes, corps = self.appel("GET", "/rapports/60/communes.csv")
+        self.assertEqual(statut, 200)
+        self.assertTrue(en_tetes.get("Content-Type", "").startswith("text/csv"))
+        self.assertIn('filename="communes_60.csv"', en_tetes.get("Content-Disposition", ""))
+        self.assertTrue(corps.startswith("\ufeffCode INSEE;Commune;Statut"))
+        statut, en_tetes, corps = self.appel("GET", "/rapports/60/export.html")
+        self.assertEqual(statut, 200)
+        self.assertIn("filename=compte-rendu_60.html", en_tetes.get("Content-Disposition", ""))
+        self.assertEqual(en_tetes.get("X-Robots-Tag"), "noindex, nofollow")
+        self.assertIn("<!DOCTYPE html>", corps)
+        for absent in ("Détails techniques", "Valeurs brutes", "Liens écartés", "/suivi", "/analyse", "/api/etat"):
+            self.assertNotIn(absent, corps)
+
+    def test_ancienne_adresse_redirigee(self):
+        statut, en_tetes, _ = self.appel("GET", "/rapport/60")
+        self.assertEqual((statut, en_tetes.get("Location")), (303, "/rapports/60"))
+        self.assertEqual(self.appel("GET", "/rapport/99")[0], 404)
+
+    def test_departement_non_publie_404(self):
+        for chemin in ("/rapports/99", "/rapports/99/communes.csv", "/rapports/99/export.html"):
+            with self.subTest(chemin=chemin):
+                self.assertEqual(self.appel("GET", chemin)[0], 404)
+
+    def test_head_rapport_sans_corps(self):
+        statut, _, corps = self.appel("HEAD", "/rapports/60")
+        self.assertEqual((statut, corps), (200, ""))
+        self.assertEqual(self.appel("HEAD", "/rapports/60/export.html")[0], 200)
+
+
+class SourceCampagnes(FileSource):
+    """Source fichiers avec un historique d'analyses (la source fichiers n'en a pas) : une analyse par statut."""
+
+    JOURNAL = "Journal secret : RUN-SECRET-42 lancé par bob@example.org"
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        jour = self.resumes()[0]["date"][:10]  # date de publication du 60 : la fenêtre des analyses la couvre
+        self.liste = [
+            {"id": 1, "statut": "terminee", "departements": ["60"], "debut": f"{jour}T00:00:00+00:00",
+             "fin": f"{jour}T23:59:59+00:00"},
+            {"id": 2, "statut": "en_cours", "departements": ["60"], "debut": f"{jour}T00:00:00+00:00", "fin": None},
+            {"id": 3, "statut": "echec", "departements": ["60"], "debut": f"{jour}T00:00:00+00:00",
+             "fin": f"{jour}T23:59:59+00:00"},
+            {"id": 4, "statut": "annulee", "departements": ["60"], "debut": f"{jour}T00:00:00+00:00",
+             "fin": f"{jour}T23:59:59+00:00"},
+            {"id": 5, "statut": "terminee", "departements": ["all"], "debut": f"{jour}T00:00:00+00:00",
+             "fin": f"{jour}T23:59:59+00:00"},
+        ]
+
+    def analyses(self, limit: int = 50) -> list[dict]:
+        return [dict(a) for a in self.liste][:limit]  # sans journal, comme store_pg.analyses
+
+    def analyse(self, analysis_id: int) -> dict | None:
+        for a in self.liste:
+            if a["id"] == analysis_id:
+                return {**a, "journal": self.JOURNAL if analysis_id == 1 else ""}
+        return None
+
+
+class LectureCampagnes(ServeurLecture):
+    """Historique public : analyses terminées seulement, vue assainie ; vue administrateur sous /admin/."""
+
+    lecture = True
+
+    def creer_source(self):
+        return SourceCampagnes(self.root)
+
+    def test_historique_terminees_seulement(self):
+        html = self.html("/campagnes")
+        self.assertIn('href="/campagnes/1"', html)
+        self.assertIn('href="/campagnes/5"', html)
+        for n in (2, 3, 4):
+            self.assertNotIn(f'href="/campagnes/{n}"', html)
+        for mot in ("En cours", "Échec", "Interrompue", "RUN-SECRET", "bob@example.org", "Journal"):
+            self.assertNotIn(mot, html)
+
+    def test_detail_terminee_assainie(self):
+        html = self.html("/campagnes/1")
+        self.assertIn("<h1>Analyse n° 1</h1>", html)
+        self.assertIn("Terminée", html)
+        self.assertIn('href="/rapports/60"', html)
+        self.assertIn("Communes des départements rattachés : 1", html)
+        self.assertIn("Lien trouvé", html)                 # libellés de statut de commune
+        for absent in ("Journal", "Journal secret", "RUN-SECRET", "bob@example.org", "/admin/", "/suivi", "/analyse"):
+            self.assertNotIn(absent, html)
+
+    def test_perimetre_toute_la_france_et_rattachement(self):
+        html = self.html("/campagnes/5")
+        self.assertIn("toute la France", html)
+        self.assertIn("Communes des départements rattachés : 2", html)
+
+    def test_campagne_non_terminee_introuvable(self):
+        for n in (2, 3, 4, 6, 99):
+            with self.subTest(n=n):
+                statut, _, corps = self.appel("GET", f"/campagnes/{n}")
+                self.assertEqual(statut, 404)
+                self.assertNotIn("Échec", corps)
+                self.assertNotIn("annul", corps.lower())
+
+    def test_meme_vue_pour_l_administrateur(self):
+        self.assertEqual(principal(self.html("/campagnes/1")), principal(self.html("/campagnes/1", auth=MOT_DE_PASSE)))
+        self.assertEqual(principal(self.html("/campagnes", auth=MOT_DE_PASSE)), principal(self.html("/campagnes")))
+
+    def test_vue_administrateur_des_campagnes(self):
+        for chemin in ("/admin/campagnes", "/admin/campagnes/1", "/admin/rapports/60"):
+            with self.subTest(chemin=chemin):
+                self.assertEqual(self.appel("GET", chemin)[0], 401)
+        liste = self.html("/admin/campagnes", auth=MOT_DE_PASSE)
+        for n in (1, 2, 3, 4, 5):                          # l'administrateur voit toutes les analyses
+            self.assertIn(f'href="/admin/campagnes/{n}"', liste)
+        detail = self.html("/admin/campagnes/1", auth=MOT_DE_PASSE)
+        self.assertIn("Journal secret", detail)            # journal et détails d'exécution : administrateur seul
+        self.assertEqual(self.appel("GET", "/admin/campagnes/99", auth=MOT_DE_PASSE)[0], 404)
+        self.assertIn("Détails techniques", self.html("/admin/rapports/60", auth=MOT_DE_PASSE))
+
+    def test_numero_hors_borne_protege(self):
+        self.assertEqual(self.appel("GET", "/campagnes/0")[0], 404)
+        self.assertEqual(self.appel("GET", "/campagnes/1234567890")[0], 401)
+        self.assertEqual(self.appel("GET", "/campagnes/1234567890", auth=MOT_DE_PASSE)[0], 404)
+
+    def test_une_seule_titre_1_et_menu_admin(self):
+        self.assertEqual(len(re.findall(r"<h1[\s>]", self.appel("GET", "/campagnes/1")[2])), 1)
+        self.assertIn('href="/admin/campagnes"', self.html("/campagnes", auth=MOT_DE_PASSE))
+        self.assertNotIn('href="/admin/campagnes"', self.html("/campagnes"))
 
 
 if __name__ == "__main__":

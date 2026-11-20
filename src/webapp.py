@@ -35,7 +35,7 @@ from markupsafe import Markup
 
 import report
 from layout import normalize_dept
-from publications import DEPT_RE, FileSource, PublicationSource, SourceIndisponible
+from publications import DEPT_RE, FileSource, PublicationSource, SourceIndisponible, instant_iso
 
 log = logging.getLogger("webapp")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -62,7 +62,7 @@ LIENS_CSV_MAX = 200_000          # plafond du CSV « tous les liens » ; au-del�
 ANCRE_LIENS = "#tous-les-liens"
 CHAMPS_TOTAUX = ("nb_communes", "nb_communes_avec_lien", "nb_communes_a_verifier", "nb_communes_sans_lien",
                  "nb_communes_non_analysables")
-CHAMPS_LIENS_CSV = ["departement_code", "departement", "code_insee", "commune", "url_page_source", "url_cible", "apparu_le"]
+CHAMPS_LIENS_CSV = ["departement_code", "departement", "code_insee", "commune", "page_source", "url_cible", "apparu_le"]
 FENETRE_NOUVEAUX_JOURS = 30      # un lien est « nouveau » pendant ce nombre de jours après sa première apparition
 NOUVEAUX_AFFICHES_MAX = 50       # lignes de la section « Nouveaux liens » de l'accueil public
 LIBELLE_RESULTATS = "Communes dont le site contient un lien vers Vos Questions"
@@ -96,6 +96,8 @@ MIME_CSV = "text/csv; charset=utf-8"
 # Lecture publique (MLM_LECTURE_PUBLIQUE) : liste blanche des seules routes ouvertes sans mot de passe (GET et HEAD).
 EN_TETES_PUBLICS = {"X-Robots-Tag": "noindex, nofollow", "Vary": "Authorization"}
 MSG_PUBLIC_INDISPONIBLE = "Les résultats ne sont pas disponibles pour le moment. Réessayez plus tard."
+CAMPAGNE_NUM = r"[0-9]{1,9}"     # numéro d'analyse dans une adresse : borné (hors bigint, la base répondrait en erreur)
+PUBLIC_CAMPAGNES_MAX = 200       # analyses lues pour l'historique public, puis filtrées sur les analyses terminées
 
 
 def static_file(rel: str) -> Path | None:
@@ -254,7 +256,11 @@ def _rendre_public(modele: str, **ctx) -> str:
 
 
 def route_publique(chemin: str) -> tuple[str, str] | None:
-    """Liste blanche des routes publiques : (genre, code) ou None. Tout chemin absent de la liste est protégé."""
+    """Liste blanche des routes publiques : (genre, code) ou None. Tout chemin absent de la liste est protégé.
+
+    Les rapports (/rapports...) et l'historique (/campagnes...) sont servis en vue assainie ; les vues d'administration
+    sont sous /admin/ (protégées). /rapport/<dép> (ancienne adresse) redirige vers /rapports/<dép>.
+    """
     if chemin == "/":
         return ("accueil", "")
     if chemin == "/a-propos":
@@ -263,6 +269,18 @@ def route_publique(chemin: str) -> tuple[str, str] | None:
         return ("resultats_csv", "")
     if m := re.fullmatch(rf"/departement/({CODE_URL})(\.csv)?", chemin):
         return ("csv" if m.group(2) else "departement", m.group(1))
+    if chemin == "/rapports":
+        return ("rapports", "")
+    if m := re.fullmatch(rf"/rapports/({CODE_URL})", chemin):
+        return ("rapport", m.group(1))
+    if m := re.fullmatch(rf"/rapports/({CODE_URL})/(communes\.csv|export\.html)", chemin):
+        return ("rapport_csv" if m.group(2) == "communes.csv" else "rapport_html", m.group(1))
+    if m := re.fullmatch(rf"/rapport/({CODE_URL})", chemin):
+        return ("rapport_ancienne", m.group(1))
+    if chemin == "/campagnes":
+        return ("campagnes", "")
+    if m := re.fullmatch(rf"/campagnes/({CAMPAGNE_NUM})", chemin):
+        return ("campagne", m.group(1))
     return None
 
 
@@ -371,20 +389,21 @@ def horloge() -> datetime:
 
 
 def est_recent(lien: dict, depuis: datetime) -> bool:
-    """Lien nouveau dont la première apparition est à `depuis` ou après. Les liens « de base » (nouveau = False) ne le sont jamais."""
-    return bool(lien.get("nouveau")) and bool(lien.get("premiere_vue")) and datetime.fromisoformat(lien["premiere_vue"]) >= depuis
+    """Lien (ou page) nouveau dont la première apparition est à `depuis` ou après. Les liens « de base » ne le sont jamais."""
+    return bool(lien.get("nouveau")) and bool(lien.get("premiere_vue")) and instant_iso(lien["premiere_vue"]) >= depuis
 
 
-def csv_liens(lignes: list[dict]) -> bytes:
-    """CSV de tous les liens confirmés (une ligne par lien), même format que les autres CSV : « ; », BOM, neutralisé."""
+def csv_liens(communes: list[dict]) -> bytes:
+    """CSV des communes à lien confirmé : une ligne par COMMUNE (page source et cible retenues). Séparateur « ; »,
+    UTF-8 avec BOM, chaque champ neutralisé contre les formules."""
     tampon = io.StringIO()
     ecrivain = csv.writer(tampon, delimiter=";", lineterminator="\r\n")
     ecrivain.writerow(CHAMPS_LIENS_CSV)
     noms = _departements().DEPARTEMENTS
-    for r in lignes:
-        ecrivain.writerow([_neutraliser(r["dept"]), _neutraliser(noms.get(r["dept"], "")), _neutraliser(r["code_insee"]),
-                           _neutraliser(r["nom_commune"]), _neutraliser(r["url_page_source"]),
-                           _neutraliser(r["url_cible"]), _neutraliser(r.get("premiere_vue") or "")])
+    for c in communes:
+        ecrivain.writerow([_neutraliser(c["dept"]), _neutraliser(noms.get(c["dept"], "")), _neutraliser(c["code_insee"]),
+                           _neutraliser(c["nom_commune"]), _neutraliser(c["page"]), _neutraliser(c.get("cible") or ""),
+                           _neutraliser(c.get("apparu_le") or "")])
     return tampon.getvalue().encode("utf-8-sig")
 
 
@@ -442,7 +461,8 @@ def pagination_liens(q: str, dep: str, courante: int, total: int) -> str:
 
 
 def tranche_liens(source: PublicationSource, q: str, dep: str, numero: int) -> tuple[list[dict], int, int, int]:
-    """(lignes de la page, total, page retenue, nombre de pages). Une page au-delà de la fin renvoie la dernière."""
+    """(communes de la page, nombre de communes, page retenue, nombre de pages). Une page au-delà de la fin renvoie
+    la dernière. La pagination compte des communes."""
     limite = LIENS_PAR_PAGE
     lignes, total = source.tous_les_liens(q, dep or None, limite, (numero - 1) * limite)
     pages = max(1, -(-total // limite))
@@ -525,6 +545,44 @@ def filtrer_departements(resumes: list[dict], q: str) -> list[dict]:
 def derniere_publication(resumes: list[dict]) -> str:
     """Date (ISO) la plus récente parmi les départements publiés ; '' s'il n'y en a aucune."""
     return max((str(r.get("date") or "") for r in resumes), default="")
+
+
+def resumes_publies(source: PublicationSource) -> list[dict]:
+    """Résumés des départements publiés (code conforme à CODE_URL), triés par code."""
+    return [r for r in source.resumes() if re.fullmatch(CODE_URL, str(r.get("code", "")))]
+
+
+# ----------------------------------------------------------------- historique public des analyses
+
+def campagnes_terminees(source: PublicationSource, limite: int) -> list[dict]:
+    """Analyses terminées uniquement : en file, en cours, annulées ou en échec, elles ne sont jamais publiques."""
+    return [a for a in source.analyses(limite) if a.get("statut") == "terminee"]
+
+
+def campagne_publique(a: dict) -> dict:
+    """Forme assainie d'une analyse : numéro, dates et périmètre. Ni journal, ni identifiant de run, ni acteur."""
+    return {"id": int(a["id"]), "debut": a.get("debut") or "", "fin": a.get("fin") or "",
+            "departements": _liste(a.get("departements"))}
+
+
+def depts_rattaches(a: dict, publies: list[dict]) -> list[dict]:
+    """Départements publiés rattachés à une analyse : dans son périmètre et dont la dernière publication tombe dans sa
+    période (jours inclusifs). Les synthèses ne portent pas d'identifiant d'analyse : le rattachement se fait par dates."""
+    perimetre = _liste(a.get("departements"))
+    debut = str(a.get("debut") or "")[:10]
+    fin = str(a.get("fin") or a.get("debut") or "")[:10]
+    return [r for r in publies
+            if ("all" in perimetre or r["code"] in perimetre) and debut <= str(r.get("date") or "")[:10] <= fin]
+
+
+def totaux_par_statut(source: PublicationSource, depts: list[dict]) -> dict[str, int]:
+    """Nombre de communes par statut, additionné sur les départements rattachés (une synthèse par département)."""
+    totaux = dict.fromkeys(STATUTS, 0)
+    for r in depts:
+        for statut, n in ((source.synthese(r["code"]) or {}).get("totaux") or {}).items():
+            if statut in totaux:
+                totaux[statut] += int(n or 0)
+    return totaux
 
 
 def resultats(source: PublicationSource, params: dict[str, list[str]]) -> str:
@@ -685,14 +743,18 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             if chemin == "/api/etat":
                 return self.send(200, json.dumps(etat_analyse(runner, source)), "application/json; charset=utf-8",
                                  {"Cache-Control": "no-store"})
+            # Sans lecture publique, ces adresses sont protégées et montrent la vue d'administration complète. Avec la
+            # lecture publique, /rapports et /campagnes sont servies par traiter_publique ; /admin/ reste ici.
             if chemin == "/rapports":
                 return self.page("rapports", actif="rapports", resumes=source.resumes())
             if chemin == "/resultats":
                 return self.send(200, resultats(source, params))
-            if chemin == "/campagnes":
+            if chemin in ("/campagnes", "/admin/campagnes"):
                 return self.page("campagnes", actif="campagnes", analyses=source.analyses(50))
-            if m := re.fullmatch(r"/campagnes/(\d+)", chemin):
+            if m := re.fullmatch(rf"/(?:admin/)?campagnes/({CAMPAGNE_NUM})", chemin):
                 return self.page_analyse_detail(int(m.group(1)))
+            if m := re.fullmatch(rf"/admin/rapports/({CODE_URL})", chemin):  # vue d'administration complète
+                return self.compte_rendu(m.group(1), None)
             if m := re.fullmatch(rf"/rapports/({CODE_URL})(?:/(export\.html|communes\.csv))?", chemin):
                 return self.compte_rendu(m.group(1), m.group(2))
             if m := re.fullmatch(rf"/rapport/({CODE_URL})", chemin):  # ancienne adresse
@@ -782,7 +844,17 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                     return self.public_apropos(admin)
                 if genre == "resultats_csv":
                     return self.public_liens_csv(params)
-                return self.public_departement(code, admin, csv=genre == "csv")
+                if genre in ("departement", "csv"):
+                    return self.public_departement(code, admin, csv=genre == "csv")
+                if genre == "rapports":
+                    return self.public_rapports(admin)
+                if genre == "rapport_ancienne":
+                    return self.public_rapport_ancienne(code, admin)
+                if genre in ("rapport", "rapport_csv", "rapport_html"):
+                    return self.public_rapport(code, admin, genre)
+                if genre == "campagnes":
+                    return self.public_campagnes(admin)
+                return self.public_campagne(int(code), admin)
             except SourceIndisponible:
                 self.public_erreur(503, "Service indisponible", MSG_PUBLIC_INDISPONIBLE, admin)
             except Exception:  # noqa: BLE001 - jamais de trace Python côté visiteur
@@ -797,20 +869,21 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             q, dep, alerte, numero = parametres_liens(params, [r["code"] for r in publies])
             lignes, total_liens, numero, pages = tranche_liens(source, q, dep, numero)
             depuis = horloge() - timedelta(days=FENETRE_NOUVEAUX_JOURS)
-            nouveaux, total_nouveaux = source.nouveaux_liens(depuis, NOUVEAUX_AFFICHES_MAX)
+            nouveaux, total_nouveaux = source.nouveaux_liens(depuis, NOUVEAUX_AFFICHES_MAX)  # communes
             noms = _departements().DEPARTEMENTS
             totaux = {cle: sum(int(r.get(cle) or 0) for r in publies) for cle in CHAMPS_TOTAUX}
             self.page_publique(
                 "accueil", admin, actif="accueil", total=len(publies), resumes=filtrer_departements(publies, q),
                 q=q, derniere=derniere_publication(publies), totaux=totaux,
-                nouveaux=[{"apparu_le": r.get("premiere_vue") or "", "departement": f"{noms.get(r['dept'], '')} ({r['dept']})",
-                           "code_insee": r["code_insee"], "commune": r["nom_commune"],
-                           "url_page_source": r["url_page_source"]} for r in nouveaux],
+                nouveaux=[{"apparu_le": c["apparu_le"], "departement": f"{noms.get(c['dept'], '')} ({c['dept']})",
+                           "code_insee": c["code_insee"], "commune": c["nom_commune"], "page": c["page"]}
+                          for c in nouveaux],
                 total_nouveaux=total_nouveaux, fenetre=FENETRE_NOUVEAUX_JOURS, nouveaux_max=NOUVEAUX_AFFICHES_MAX,
-                liens=[{"departement": f"{noms.get(r['dept'], '')} ({r['dept']})", "code_insee": r["code_insee"],
-                        "commune": r["nom_commune"], "url_page_source": r["url_page_source"],
-                        "url_cible": r["url_cible"], "apparu_le": r.get("premiere_vue") or "",
-                        "recent": est_recent(r, depuis)} for r in lignes],
+                liens=[{"departement": f"{noms.get(c['dept'], '')} ({c['dept']})", "code_insee": c["code_insee"],
+                        "commune": c["nom_commune"], "page": c["page"], "cible": c["cible"],
+                        "apparu_le": c["apparu_le"],
+                        "recent": est_recent({"nouveau": c["nouveau"], "premiere_vue": c["apparu_le"]}, depuis)}
+                       for c in lignes],
                 liens_total=total_liens, liens_page=numero, liens_pages=pages, dep=dep, alerte_liens=alerte,
                 liens_pagination=Markup(pagination_liens(q, dep, numero, pages)) if pages > 1 else "",
                 depts_choix=[{"code": r["code"], "libelle": f"{r['code']} {noms.get(r['code'], r.get('nom', ''))}"}
@@ -837,7 +910,51 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             if csv:
                 return self.csv_reponse(csv_communes(synth), f"communes_{code}.csv")
             self.page_publique("departement", admin, actif="", synth=synth, vue=vue_compte_rendu(synth), autonome=True,
-                               lecture=True, url_csv=f"/departement/{code}.csv")
+                               lecture=True, url_csv=f"/departement/{code}.csv", url_html=None,
+                               retour=("/", "Retour à la liste des départements"), sans_exploitation=False)
+
+        def public_rapports(self, admin: bool):
+            publies = resumes_publies(source)
+            self.page_publique("rapports", admin, actif="rapports", resumes=publies, derniere=derniere_publication(publies),
+                               sans_exploitation=True)
+
+        def public_rapport_ancienne(self, code: str, admin: bool):
+            """/rapport/<dép> : ancienne adresse, redirigée vers /rapports/<dép> quand le département est publié."""
+            if code in source.depts():
+                return self.redirect(f"/rapports/{code}")
+            return self.public_erreur(404, "Page introuvable", "Aucun résultat publié pour ce département.", admin)
+
+        def public_rapport(self, code: str, admin: bool, genre: str):
+            """Rapport d'un département (vue assainie, identique pour tous) ; CSV et export HTML autonome."""
+            synth = source.synthese(code)
+            if synth is None:
+                return self.public_erreur(404, "Page introuvable", "Aucun résultat publié pour ce département.", admin)
+            if genre == "rapport_csv":
+                return self.csv_reponse(csv_communes(synth), f"communes_{code}.csv")
+            if genre == "rapport_html":
+                corps = _rendre("export", synth=synth, vue=vue_compte_rendu(synth), css=_css_autonome(), autonome=True,
+                                lecture=True)
+                return self.send(200, corps, extra={"Content-Disposition": f"attachment; filename=compte-rendu_{code}.html"})
+            self.page_publique("departement", admin, actif="rapports", synth=synth, vue=vue_compte_rendu(synth), autonome=True,
+                               lecture=True, url_csv=f"/rapports/{code}/communes.csv",
+                               url_html=f"/rapports/{code}/export.html",
+                               retour=("/rapports", "Retour à la liste des rapports"), sans_exploitation=True)
+
+        def public_campagnes(self, admin: bool):
+            terminees = campagnes_terminees(source, PUBLIC_CAMPAGNES_MAX)
+            self.page_publique("campagnes", admin, actif="campagnes", analyses=[campagne_publique(a) for a in terminees],
+                               derniere=derniere_publication(resumes_publies(source)), sans_exploitation=True)
+
+        def public_campagne(self, aid: int, admin: bool):
+            a = source.analyse(aid)
+            if a is None or a.get("statut") != "terminee":  # en file, en cours, annulée ou en échec : invisible
+                return self.public_erreur(404, "Page introuvable", "Aucune analyse terminée ne porte ce numéro.", admin)
+            publies = resumes_publies(source)
+            rattaches = depts_rattaches(a, publies)
+            self.page_publique("campagne", admin, actif="campagnes", a=campagne_publique(a), rattaches=rattaches,
+                               nb_communes=sum(int(r.get("nb_communes") or 0) for r in rattaches),
+                               totaux=totaux_par_statut(source, rattaches), derniere=derniere_publication(publies),
+                               sans_exploitation=True)
 
         def public_erreur(self, status: int, titre: str, message: str, admin: bool):
             self.page_publique("erreur", admin, status, code=status, titre=titre, message=message, actif="", derniere=None)

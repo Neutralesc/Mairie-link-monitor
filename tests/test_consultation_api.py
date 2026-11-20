@@ -139,9 +139,20 @@ class LectureActiveeTests(ServeurApi):
             self.assertNotIn(secret, corps)
 
     def test_protegees_toujours_401(self):
-        for chemin in ("/analyse", "/suivi", "/api/etat", "/rapports", "/campagnes", "/inconnu", "/tableau-de-bord"):
+        for chemin in ("/analyse", "/suivi", "/api/etat", "/admin/campagnes", "/admin/rapports/60", "/inconnu",
+                       "/tableau-de-bord"):
             with self.subTest(chemin=chemin):
                 self.assertEqual(self.appel(chemin)[0], 401)
+
+    def test_rapports_et_campagnes_publics_base_en_panne(self):
+        # Publics avec la lecture activée : pas de 401, réponse sobre 503 quand la base est en panne.
+        for chemin in ("/rapports", "/rapports/60", "/campagnes", "/campagnes/1"):
+            with self.subTest(chemin=chemin):
+                status, en_tetes, corps = self.appel(chemin)
+                self.assertIn(status, (503, 404))
+                self.assertNotEqual(status, 401)
+                self.assertNotIn(MOT_DE_PASSE, corps)
+                self.assertEqual(en_tetes.get("X-Robots-Tag"), "noindex, nofollow")
 
     def test_racine_admin_avec_identifiant_valide(self):
         self.assertEqual(self.appel("/", auth=MOT_DE_PASSE)[0], 503)  # résultats publics : base en panne, comme un visiteur
