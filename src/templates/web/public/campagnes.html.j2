@@ -1,0 +1,17 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}Historique des analyses{% endblock %}
+{% block contenu %}
+<h1>Historique des analyses</h1>
+<p class="fr-text--lead">Analyses terminées, de la plus récente à la plus ancienne.</p>
+{% if analyses %}
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Analyses terminées</caption>
+<thead><tr><th scope="col">Analyse</th><th scope="col">Début</th><th scope="col">Fin</th><th scope="col">Statut</th><th scope="col">Périmètre</th></tr></thead>
+<tbody>{% for a in analyses %}<tr>
+  <th scope="row"><a class="fr-link" href="/campagnes/{{ a.id }}">n° {{ a.id }}</a></th>
+  <td>{{ a.debut|date }}</td><td>{{ a.fin|date if a.fin else '-' }}</td>
+  <td><span class="fr-badge fr-badge--sm fr-badge--success fr-badge--no-icon">Terminée</span></td>
+  <td>{{ a.departements|depts }}</td>
+</tr>{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<p>Aucune analyse terminée pour le moment.</p>{% endif %}
+{% endblock %}

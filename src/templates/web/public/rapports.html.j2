@@ -1,0 +1,21 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}Rapports par département{% endblock %}
+{% block contenu %}
+<h1>Rapports par département</h1>
+<p class="fr-text--lead">Pour chaque département, seule la dernière analyse est affichée. Les analyses précédentes figurent dans l'<a class="fr-link" href="/campagnes">historique</a>.</p>
+{% if resumes %}
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Dernière analyse de chaque département publié</caption>
+<thead><tr><th scope="col">Département</th><th scope="col">Date de l'analyse</th><th scope="col">Communes</th>
+  <th scope="col">Avec lien</th><th scope="col">À vérifier</th><th scope="col">Sans lien</th><th scope="col">Non analysables</th><th scope="col">Rapport</th></tr></thead>
+<tbody>{% for r in resumes %}<tr>
+  <th scope="row">{{ r.code }} {{ r.nom }}</th>
+  <td>{{ r.date|date }}{% if r.statut_campagne == 'interrompue' %} (résultats partiels){% endif %}</td>
+  <td>{{ r.nb_communes }}</td><td>{{ r.nb_communes_avec_lien }}</td><td>{{ r.nb_communes_a_verifier }}</td>
+  <td>{{ r.nb_communes_sans_lien }}</td><td>{{ r.nb_communes_non_analysables }}</td>
+  <td><a class="fr-link" href="/rapports/{{ r.code }}">Voir le rapport<span class="fr-sr-only"> de {{ r.nom }}</span></a>
+    <br><a class="fr-link fr-link--sm" href="/rapports/{{ r.code }}/export.html">HTML<span class="fr-sr-only"> de {{ r.nom }}</span></a>
+    · <a class="fr-link fr-link--sm" href="/rapports/{{ r.code }}/communes.csv">CSV<span class="fr-sr-only"> de {{ r.nom }}</span></a></td>
+</tr>{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<div class="fr-alert fr-alert--info"><p>Aucun rapport publié pour le moment.</p></div>{% endif %}
+{% endblock %}

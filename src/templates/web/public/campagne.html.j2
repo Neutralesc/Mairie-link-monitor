@@ -1,0 +1,24 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}Analyse n° {{ a.id }}{% endblock %}
+{% block contenu %}
+<p><a class="fr-link" href="/campagnes">Retour à l'historique des analyses</a></p>
+<h1>Analyse n° {{ a.id }}</h1>
+<p><span class="fr-badge fr-badge--sm fr-badge--success fr-badge--no-icon">Terminée</span></p>
+<ul>
+  <li>Début : {{ a.debut|date }}</li>
+  <li>Fin : {{ a.fin|date if a.fin else '-' }}</li>
+  <li>Périmètre : {{ a.departements|depts }}</li>
+  <li>Communes des départements rattachés : {{ nb_communes }}</li>
+</ul>
+{% if rattaches %}
+<h2 class="fr-h4 fr-mt-3w">Départements rattachés à cette analyse</h2>
+<ul>{% for r in rattaches %}<li><a class="fr-link" href="/rapports/{{ r.code }}">{{ r.code }} {{ r.nom }}</a></li>{% endfor %}</ul>
+<h2 class="fr-h4 fr-mt-3w">Communes par statut</h2>
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Nombre de communes par statut, pour les départements rattachés à cette analyse</caption>
+<thead><tr><th scope="col">Statut</th><th scope="col">Communes</th></tr></thead>
+<tbody>{% for code, (libelle, modif) in STATUTS.items() %}<tr><th scope="row">{{ libelle }}</th><td>{{ totaux.get(code, 0) }}</td></tr>{% endfor %}</tbody></table>
+</div></div></div></div>
+<p class="fr-text--sm">Les départements rattachés sont ceux dont la dernière publication date de la période de cette analyse.</p>
+{% else %}<p>Aucune publication de département ne correspond à cette analyse : aucun total n'est affiché.</p>{% endif %}
+{% endblock %}

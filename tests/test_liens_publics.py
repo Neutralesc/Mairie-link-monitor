@@ -20,17 +20,20 @@ import liens_vus  # noqa: E402
 import store_pg  # noqa: E402
 import webapp  # noqa: E402
 from layout import DeptPaths  # noqa: E402
-from publications import FileSource, liens_confirmes, selection_liens  # noqa: E402
+from publications import (FileSource, grouper_communes, liens_confirmes, normaliser_page,  # noqa: E402
+                          selection_communes, selection_nouveaux)
 from test_consultation import MOT_DE_PASSE, ServeurLecture  # noqa: E402
 
 CIBLE = "https://vosquestions.ecologie-territoires.gouv.fr/question"
 FORMULE = '=HYPERLINK("https://evil.example","clic")'
 HOSTILE = '"><script>alert(1)</script>'
 FORMULES = ("=", "+", "-", "@", "\t", "\r")
-# 60 : 101 communes « Commune 001 » à « Commune 101 » + « Double » (deux pages source) = 103 lignes
-# 80 : une commune à formule tableur (page javascript:, non liée) et « Amiens » = 2 lignes
-# 02 : dossier publié sans inventaire (synthèse vide, ignorée) ; total attendu = 105 lignes, 2 pages de 100
-TOTAL = 105
+# 60 : 101 communes « Commune 001 » à « Commune 101 » + « Double » (deux pages source) = 103 liens
+# 80 : une commune à formule tableur (page javascript:, non liée) et « Amiens » = 2 liens
+# 02 : dossier publié sans inventaire (synthèse vide, ignorée).
+# Une ligne par COMMUNE (un seul lien retenu) : 104 communes, deux pages de 100 communes.
+TOTAL = 104
+COMPTE = f"{TOTAL} communes"
 
 
 def ligne(code: str, page: str) -> dict:
@@ -105,16 +108,17 @@ class ContratLiensPublics:
     def test_colonnes_et_une_ligne_par_lien(self):
         html = self.html("/")
         for entete in ("Département", "Code INSEE", "Nom de la commune",
-                       "Lien de la page de la commune où se trouve le lien vers Vos questions",
-                       "Adresse visée (Vos questions)"):
+                       "Page de la commune où se trouve le lien vers Vos questions",
+                       "Lien vers vosquestions", "Apparu le"):
             self.assertIn(f'<th scope="col">{entete}</th>', html)
-        self.assertIn(f"{TOTAL} résultats, page 1 sur 2.", html)
+        self.assertIn(f"{COMPTE}, page 1 sur 2.", html)
         self.assertIn("<td>Oise (60)</td>", html)
         self.assertIn("<td>60001</td>", html)
         seconde = self.html("/?page=2")  # « Double » est en fin de département, donc sur la page 2
         self.assertIn("<td>Double</td>", seconde)
         self.assertIn('href="https://double.example/"', seconde)
-        self.assertIn('href="https://double.example/contact"', seconde)  # deuxième page de la commune = deuxième ligne
+        self.assertEqual(seconde.count("<td>Double</td>"), 1)  # une seule ligne pour la commune
+        self.assertNotIn('href="https://double.example/contact"', seconde)  # un seul lien retenu
 
     def test_pagination_cent_lignes_par_page(self):
         premiere = self.html("/")
@@ -127,7 +131,7 @@ class ContratLiensPublics:
         seconde = self.html("/?page=2")
         self.assertIn('rel="prev"', seconde)
         self.assertNotIn('rel="next"', seconde)
-        self.assertIn(f"{TOTAL} résultats, page 2 sur 2.", seconde)
+        self.assertIn(f"{COMPTE}, page 2 sur 2.", seconde)
         self.assertIn("<td>Commune 101</td>", seconde)
         self.assertNotIn("<td>Commune 100</td>", seconde)
         self.assertIn('href="/?page=1#tous-les-liens"', seconde)  # liens ancrés sur le titre de section
@@ -138,11 +142,11 @@ class ContratLiensPublics:
             with self.subTest(page=brut):
                 statut, _, corps = self.appel("GET", "/?page=" + brut)
                 self.assertEqual(statut, 200)
-                self.assertIn(f"{TOTAL} résultats, page 1 sur 2.", corps)
+                self.assertIn(f"{COMPTE}, page 1 sur 2.", corps)
 
     def test_filtre_departement(self):
         html = self.html("/?dep=80")
-        self.assertIn("2 résultats, page 1 sur 1.", html)
+        self.assertIn("2 communes, page 1 sur 1.", html)
         self.assertIn("<td>Amiens</td>", html)
         self.assertNotIn("<td>Commune 001</td>", html)
         self.assertNotIn('aria-label="Pagination des liens"', html)
@@ -150,9 +154,9 @@ class ContratLiensPublics:
         self.assertIn('href="/#tous-les-liens">Réinitialiser', html)
 
     def test_filtre_recherche_commune_et_insee(self):
-        self.assertIn("1 résultat, page 1 sur 1.", self.html("/?q=Commune%20007"))
-        self.assertIn("2 résultats, page 1 sur 1.", self.html("/?q=60900"))   # code INSEE
-        self.assertIn("2 résultats, page 1 sur 1.", self.html("/?q=double"))  # sans casse
+        self.assertIn("1 commune, page 1 sur 1.", self.html("/?q=Commune%20007"))
+        self.assertIn("1 commune, page 1 sur 1.", self.html("/?q=60900"))   # code INSEE
+        self.assertIn("1 commune, page 1 sur 1.", self.html("/?q=double"))  # sans casse
         self.assertIn("Aucun résultat pour cette recherche.", self.html("/?q=double&dep=80"))
 
     def test_departement_invalide_ignore_avec_alerte(self):
@@ -161,7 +165,7 @@ class ContratLiensPublics:
                 statut, _, corps = self.appel("GET", "/?dep=" + dep)
                 self.assertEqual(statut, 200)
                 self.assertIn("Département inconnu", corps)
-                self.assertIn(f"{TOTAL} résultats, page 1 sur 2.", corps)
+                self.assertIn(f"{COMPTE}, page 1 sur 2.", corps)
                 self.assertNotIn("<script>alert", corps)
 
     def test_recherche_hostile_echappee(self):
@@ -236,10 +240,10 @@ class ContratLiensPublics:
         self.assertEqual(en_tetes.get("Cache-Control"), "no-store")
         self.assertIn("Authorization", en_tetes.get("Vary", ""))
         lignes = cellules(corps)
-        self.assertEqual(lignes[0], ["departement_code", "departement", "code_insee", "commune", "url_page_source",
+        self.assertEqual(lignes[0], ["departement_code", "departement", "code_insee", "commune", "page_source",
                                      "url_cible", "apparu_le"])
-        self.assertEqual(len(lignes) - 1, TOTAL)
-        self.assertIn(["60", "Oise", "60900", "Double", "https://double.example/contact", CIBLE], [l[:6] for l in lignes])
+        self.assertEqual(len(lignes) - 1, TOTAL)  # une ligne par commune
+        self.assertIn(["60", "Oise", "60900", "Double", "https://double.example/", CIBLE], [l[:6] for l in lignes])
         self.assertTrue(all(l[6] == "" or "T" in l[6] for l in lignes[1:]))  # date ISO ou vide (base sans date)
         self.assertFalse(any(l[0] == "02" for l in lignes[1:]))  # dossier sans synthèse : ignoré
 
@@ -253,7 +257,7 @@ class ContratLiensPublics:
 
     def test_csv_filtres(self):
         self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?dep=80")[2])) - 1, 2)
-        self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?q=60900")[2])) - 1, 2)
+        self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?q=60900")[2])) - 1, 1)
         self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?q=Commune%20007")[2])) - 1, 1)
         self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?dep=02")[2])) - 1, 0)  # publié, sans lien
         self.assertEqual(len(cellules(self.appel("GET", "/resultats.csv?dep=99")[2])) - 1, TOTAL)  # filtre ignoré
@@ -283,12 +287,12 @@ class ContratNouveaux:
 
     def test_cycle_des_nouveautes(self):
         # amorçage : rien de nouveau tant que rien n'a changé
-        self.assertIn("Aucun nouveau lien ces 30 derniers jours.", self.section_nouveaux(self.html("/")))
+        self.assertIn("Aucune nouvelle commune ces 30 derniers jours.", self.section_nouveaux(self.html("/")))
         # un lien de plus, avec un nom hostile : une nouveauté, échappée
         ecrire_commune(self.root, "80", "80003", HOSTILE_NOM, "https://nouvelle.example/")
         self.republier()
         html = self.html("/")
-        self.assertIn("1 nouveau lien depuis 30 jours.", html)
+        self.assertIn("1 commune avec un nouveau lien depuis 30 jours.", html)
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", self.section_nouveaux(html))
         self.assertNotIn("<img src=x", html)
         self.assertIn("(nouvelle fenêtre)", self.section_nouveaux(html))
@@ -298,7 +302,7 @@ class ContratNouveaux:
         lignes = self.nombre_lignes_vues()
         self.republier()
         self.assertEqual(self.nombre_lignes_vues(), lignes)
-        self.assertIn("1 nouveau lien depuis 30 jours.", self.html("/"))
+        self.assertIn("1 commune avec un nouveau lien depuis 30 jours.", self.html("/"))
         # lien disparu puis réapparu : la première date est gardée
         retirer_liens(self.root, "80", "80003")
         self.republier()
@@ -309,24 +313,24 @@ class ContratNouveaux:
         ecrire_commune(self.root, "27", "27001", "Evreux", "https://evreux.example/")
         ecrire_commune(self.root, "27", "27002", "Vernon", "https://vernon.example/")
         self.republier()
-        self.assertIn("3 nouveaux liens depuis 30 jours.", self.html("/"))
+        self.assertIn("3 communes avec un nouveau lien depuis 30 jours.", self.html("/"))
 
     def test_hors_fenetre_absent_de_la_section(self):
         self.html("/")  # amorçage (première lecture) avant le nouveau lien
         ecrire_commune(self.root, "80", "80003", "Nouvelle", "https://nouvelle.example/")
         self.republier()
-        self.assertIn("1 nouveau lien depuis 30 jours.", self.html("/"))
+        self.assertIn("1 commune avec un nouveau lien depuis 30 jours.", self.html("/"))
         plus_tard = datetime.now(timezone.utc) + timedelta(days=31)
         with mock.patch.object(webapp, "horloge", lambda: plus_tard):
             html = self.html("/")
-        self.assertIn("Aucun nouveau lien ces 30 derniers jours.", self.section_nouveaux(html))
+        self.assertIn("Aucune nouvelle commune ces 30 derniers jours.", self.section_nouveaux(html))
         self.assertNotIn(">nouveau</span>", html)  # repère absent du tableau complet aussi
 
     def test_migration_sans_table_amorcee_sans_nouveau(self):
         ecrire_commune(self.root, "80", "80003", "Nouvelle", "https://nouvelle.example/")
         self.republier()
         self.reinitialiser_table()  # base sans liens_vus : l'existant (dont 80003) devient la base
-        self.assertIn("Aucun nouveau lien ces 30 derniers jours.", self.section_nouveaux(self.html("/")))
+        self.assertIn("Aucune nouvelle commune ces 30 derniers jours.", self.section_nouveaux(self.html("/")))
         self.assertGreater(self.nombre_lignes_vues(), 0)
 
     def test_repere_nouveau_dans_le_tableau_complet(self):
@@ -466,9 +470,9 @@ class HelpersLiens(unittest.TestCase):
                    "url_cible": ""},
                   {"dept": "60", "code_insee": "60001", "nom_commune": "Abbeville", "url_page_source": "https://a/",
                    "url_cible": ""}]
-        tranche, total = selection_liens(lignes, "elancourt", 10, 0)
+        tranche, total = selection_communes(lignes, "elancourt", 10, 0)
         self.assertEqual((total, [r["code_insee"] for r in tranche]), (1, ["78172"]))
-        tranche, total = selection_liens(lignes, "", 1, 1)
+        tranche, total = selection_communes(lignes, "", 1, 1)
         self.assertEqual((total, [r["code_insee"] for r in tranche]), (2, ["78172"]))  # tri : Abbeville puis Élancourt
 
     def test_parametres_publics(self):
@@ -485,6 +489,145 @@ class HelpersLiens(unittest.TestCase):
         self.assertIn('rel="next"', html)
         self.assertIn("q=a%26b", html)  # valeur encodée dans l'adresse
         self.assertIn("#tous-les-liens", html)
+
+
+CIBLE_COMMUNE = "https://vosquestions.ecologie-territoires.gouv.fr/35040-breteil"
+CIBLE_RACINE = "https://vosquestions.ecologie-territoires.gouv.fr/?utm_source=chatgpt.com"
+PAGE_BRETEIL = "https://www.breteil.bzh/actualite/les-reponses-a-vos-questions-a-breteil"
+
+
+def lien(code: str, page: str, cible: str) -> dict:
+    return {"code_insee": code, "site_url": "https://site.example/", "page_url": page, "type_lien": "lien",
+            "target_url": cible, "texte_lien": "Vos questions"}
+
+
+def construire_regroupement(root: Path) -> None:
+    """35 : Breteil (même page, deux cibles) et Saint-Test (quatre écritures d'une même page) ;
+    81 : 80 communes, 70 avec deux pages, 10 avec une (150 pages) ; 82 : 101 communes à une page chacune."""
+    def departement(code: str, communes: list[tuple[str, str]], liens: list[dict]) -> None:
+        p = DeptPaths(root, code)
+        p.reports_dir.mkdir(parents=True)
+        csvio.write_rows(p.inventory_communes, [{"code_insee": c, "nom_commune": n, "nb_urls_valides": "1"}
+                                                for c, n in communes])
+        csvio.write_rows(p.links_found, liens)
+        history.record(p, history.db_path(root))
+
+    departement("35", [("35040", "Breteil"), ("35041", "Saint-Test")], [
+        lien("35040", PAGE_BRETEIL, CIBLE_COMMUNE), lien("35040", PAGE_BRETEIL, CIBLE_RACINE),
+        lien("35041", "https://saint-test.fr/", CIBLE_COMMUNE),
+        lien("35041", "http://www.saint-test.fr/?utm_source=x#top", CIBLE_COMMUNE),
+        lien("35041", "https://saint-test.fr", CIBLE_COMMUNE)])
+    communes81 = [(f"81{n:03d}", f"Ville 81-{n:03d}") for n in range(1, 81)]
+    liens81 = []
+    for n in range(1, 81):
+        liens81.append(lien(f"81{n:03d}", f"https://ville81-{n:03d}.example/a", CIBLE_COMMUNE))
+        if n <= 70:
+            liens81.append(lien(f"81{n:03d}", f"https://ville81-{n:03d}.example/b", CIBLE_COMMUNE))
+    departement("81", communes81, liens81)
+    communes82 = [(f"82{n:03d}", f"Ville 82-{n:03d}") for n in range(1, 102)]
+    departement("82", communes82, [lien(c, f"https://ville82-{c[2:]}.example/", CIBLE_COMMUNE) for c, _ in communes82])
+
+
+class RegroupementCommunes(ServeurLecture):
+    """Une ligne par commune (un seul lien retenu) : pagination et compteur en communes, CSV par commune."""
+
+    lecture = True
+
+    def preparer(self, root: Path) -> None:
+        construire_regroupement(root)
+
+    def test_breteil_une_ligne_cible_propre(self):
+        html = self.html("/?dep=35&q=breteil")
+        self.assertEqual(html.count("<td>Breteil</td>"), 1)
+        self.assertEqual(html.count(f'href="{PAGE_BRETEIL}"'), 1)
+        self.assertIn(f'href="{CIBLE_COMMUNE}"', html)           # cible propre à la commune retenue
+        self.assertNotIn(f'href="{CIBLE_RACINE}"', html)         # la racine avec utm n'est pas affichée
+        self.assertIn("1 commune, page 1 sur 1.", html)
+        lignes = cellules(self.appel("GET", "/resultats.csv?dep=35&q=breteil")[2])
+        self.assertEqual(len(lignes), 2)                         # en-tête + une commune
+        self.assertEqual(lignes[1][4], PAGE_BRETEIL)
+        self.assertEqual(lignes[1][5], CIBLE_COMMUNE)
+
+    def test_urls_equivalentes_une_seule_page(self):
+        lignes = cellules(self.appel("GET", "/resultats.csv?dep=35&q=saint-test")[2])
+        self.assertEqual(len(lignes), 2)
+        self.assertEqual(lignes[1][4], "https://saint-test.fr")  # une page, forme https la plus courte
+        self.assertEqual(lignes[1][5], CIBLE_COMMUNE)
+
+    def test_pagination_en_communes(self):
+        premiere = self.html("/?dep=82")
+        self.assertIn("101 communes, page 1 sur 2.", premiere)
+        self.assertEqual(premiere.count("<td>Ville 82-"), 100)
+        seconde = self.html("/?dep=82&page=2")
+        self.assertIn("101 communes, page 2 sur 2.", seconde)
+        self.assertEqual(seconde.count("<td>Ville 82-"), 1)
+
+    def test_compteur_en_communes(self):
+        self.assertIn("80 communes, page 1 sur 1.", self.html("/?dep=81"))
+        self.assertIn("9 communes, page 1 sur 1.", self.html("/?dep=81&q=Ville%2081-00"))
+        self.assertIn("1 commune, page 1 sur 1.", self.html("/?dep=81&q=Ville%2081-001"))
+
+    def test_filtre_departement_et_recherche_par_code(self):
+        self.assertIn("1 commune, page 1 sur 1.", self.html("/?q=35040"))
+        self.assertIn("Aucun résultat pour cette recherche.", self.html("/?dep=35&q=81001"))
+
+    def test_csv_une_ligne_par_commune_neutralisee(self):
+        lignes = cellules(self.appel("GET", "/resultats.csv?dep=81")[2])
+        self.assertEqual(len(lignes) - 1, 80)
+        deux = [l for l in lignes[1:] if l[3] == "Ville 81-001"][0]
+        self.assertEqual(deux[4], "https://ville81-001.example/a")  # deux pages : la plus propre, alphabétique
+        for ligne_ in lignes:
+            for c in ligne_:
+                self.assertFalse(c.startswith(FORMULES), c)
+
+
+def lien_test(code: str, page: str, cible: str, vue: str, nouveau: bool = False, nom: str = "A") -> dict:
+    return {"dept": "60", "code_insee": code, "nom_commune": nom, "url_page_source": page, "url_cible": cible,
+            "premiere_vue": vue, "nouveau": nouveau}
+
+
+class NormalisationEtGroupes(unittest.TestCase):
+    def test_normaliser_page_equivalences(self):
+        self.assertEqual(normaliser_page("http://www.A.fr:80/x/?utm_source=a&b=1#f"), normaliser_page("https://a.fr/x?b=1"))
+        self.assertEqual(normaliser_page("https://a.fr/"), normaliser_page("https://a.fr"))
+        self.assertEqual(normaliser_page("https://a.fr/?fbclid=1&gclid=2&q=3"), "https://a.fr/?q=3")
+        self.assertEqual(normaliser_page("https://a.fr/x/"), "https://a.fr/x")
+        self.assertNotEqual(normaliser_page("https://a.fr/x"), normaliser_page("https://a.fr/y"))
+        self.assertEqual(normaliser_page("javascript:alert(1)"), "javascript:alert(1)")  # pas de fusion abusive
+
+    def test_breteil_un_lien_retenu_apparu_le_le_plus_ancien(self):
+        liens = [lien_test("35040", PAGE_BRETEIL, CIBLE_COMMUNE, "2026-11-02T10:00:00+00:00", nom="Breteil"),
+                 lien_test("35040", PAGE_BRETEIL, CIBLE_RACINE, "2026-11-01T10:00:00+00:00", True, nom="Breteil")]
+        communes = grouper_communes(liens)
+        self.assertEqual(len(communes), 1)
+        self.assertEqual((communes[0]["page"], communes[0]["cible"]), (PAGE_BRETEIL, CIBLE_COMMUNE))
+        self.assertEqual(communes[0]["apparu_le"], "2026-11-01T10:00:00+00:00")  # la plus ancienne, tous liens confondus
+        self.assertTrue(communes[0]["nouveau"])
+
+    def test_deux_pages_la_plus_propre_puis_la_plus_courte(self):
+        liens = [lien_test("60001", "https://a.fr/long/page?utm_source=x", CIBLE_COMMUNE, "2026-11-01T10:00:00+00:00"),
+                 lien_test("60001", "http://a.fr/p", CIBLE_COMMUNE, "2026-11-01T10:00:00+00:00"),
+                 lien_test("60001", "https://a.fr/p", CIBLE_COMMUNE, "2026-11-02T10:00:00+00:00")]
+        self.assertEqual(grouper_communes(liens)[0]["page"], "https://a.fr/p")
+        self.assertEqual(grouper_communes(list(reversed(liens)))[0]["page"], "https://a.fr/p")  # déterministe
+
+    def test_deux_cibles_generiques_la_plus_propre(self):
+        liens = [lien_test("60001", "https://a.fr/p", CIBLE_RACINE, "2026-11-01T10:00:00+00:00"),
+                 lien_test("60001", "https://a.fr/p", "https://vosquestions.ecologie-territoires.gouv.fr/",
+                           "2026-11-02T10:00:00+00:00")]
+        self.assertEqual(grouper_communes(liens)[0]["cible"], "https://vosquestions.ecologie-territoires.gouv.fr/")
+
+    def test_nouveaux_une_ligne_par_commune(self):
+        maintenant = datetime.now(timezone.utc)
+        recent = (maintenant - timedelta(days=1)).isoformat()
+        ancien = (maintenant - timedelta(days=90)).isoformat()
+        liens = [lien_test("60001", "https://a.fr/old", CIBLE_COMMUNE, ancien),
+                 lien_test("60001", "https://a.fr/new2", CIBLE_COMMUNE, recent, True),
+                 lien_test("60001", "https://a.fr/new1", CIBLE_COMMUNE, recent, True)]
+        tranche, total = selection_nouveaux(liens, maintenant - timedelta(days=30), 10)
+        self.assertEqual(total, 1)
+        self.assertEqual(tranche[0]["page"], "https://a.fr/new1")
+        self.assertEqual(tranche[0]["apparu_le"], recent)
 
 
 if __name__ == "__main__":

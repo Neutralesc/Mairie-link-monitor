@@ -8,7 +8,7 @@
 <table><caption>Analyses, de la plus récente à la plus ancienne</caption>
 <thead><tr><th scope="col">Analyse</th><th scope="col">Début</th><th scope="col">Fin</th><th scope="col">Statut</th><th scope="col">Départements</th></tr></thead>
 <tbody>{% for a in analyses %}{% set lib, modif = STATUTS_ANALYSE.get(a.statut, (a.statut, 'info')) %}<tr>
-  <th scope="row"><a href="/campagnes/{{ a.id }}">n° {{ a.id }}</a></th><td>{{ a.debut|date }}</td><td>{{ a.fin|date if a.fin else '-' }}</td>
+  <th scope="row"><a href="/admin/campagnes/{{ a.id }}">n° {{ a.id }}</a></th><td>{{ a.debut|date }}</td><td>{{ a.fin|date if a.fin else '-' }}</td>
   <td><span class="fr-badge fr-badge--sm fr-badge--{{ modif }} fr-badge--no-icon">{{ lib }}</span></td>
   <td>{{ a.departements|depts }}</td>
 </tr>{% endfor %}</tbody></table></div></div></div></div>

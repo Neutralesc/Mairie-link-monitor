@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import coverage
 import history
@@ -85,22 +86,133 @@ def trier_liens_confirmes(rows: list[dict]) -> list[dict]:
                                        r["code_insee"], r["url_page_source"], r["url_cible"]))
 
 
-def selection_liens(rows: list[dict], q: str, limit: int, offset: int) -> tuple[list[dict], int]:
-    """Filtre `q` (nom de commune ou code INSEE, sans accents ni casse), tri commun, puis tranche.
+PARAMETRES_SUIVI = re.compile(r"^utm_|^(fbclid|gclid)$", re.IGNORECASE)  # retirés de la clé d'une page
+PORTS_PAR_DEFAUT = (80, 443)                                                       # http et https confondus
 
-    Retourne (tranche, total des lignes filtrées). `limit` et `offset` sont des entiers positifs ou nuls.
+
+def instant_iso(iso: str) -> datetime:
+    """Date ISO en instant aware (une date sans fuseau est lue en UTC)."""
+    d = datetime.fromisoformat(iso)
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def normaliser_page(url: str) -> str:
+    """Clé de dédoublonnage d'une page : http et https confondus, hôte en minuscules sans « www. » ni point final, sans
+    fragment, « / » final retiré (sauf racine), port par défaut retiré, paramètres de suivi (utm_*, fbclid, gclid) retirés.
+    Une adresse qui n'est pas http(s) ou non analysable garde sa forme brute : aucune fusion abusive."""
+    brut = (url or "").strip()
+    try:
+        parties = urlsplit(brut)
+        if parties.scheme.lower() not in ("http", "https") or not parties.hostname:
+            return brut
+        hote = parties.hostname.lower().rstrip(".")
+        hote = hote[4:] if hote.startswith("www.") else hote
+        port = parties.port
+        netloc = hote if port is None or port in PORTS_PAR_DEFAUT else f"{hote}:{port}"
+        chemin = parties.path or "/"
+        if chemin != "/":
+            chemin = chemin.rstrip("/") or "/"
+        requete = urlencode([(k, v) for k, v in parse_qsl(parties.query, keep_blank_values=True)
+                             if not PARAMETRES_SUIVI.match(k)])
+        return urlunsplit(("https", netloc, chemin, requete, ""))
+    except ValueError:
+        return brut
+
+
+GENERIQUES = ("", "/", "/index.html", "/index.php")  # chemins d'une racine ou d'une page d'accueil de site
+
+
+def sans_suivi(url: str) -> str:
+    """URL d'origine sans paramètres de suivi ni fragment ; les autres paramètres et la casse sont conservés."""
+    brut = (url or "").strip()
+    try:
+        parties = urlsplit(brut)
+    except ValueError:
+        return brut
+    requete = "&".join(x for x in parties.query.split("&") if x and not PARAMETRES_SUIVI.match(x.split("=", 1)[0]))
+    return urlunsplit((parties.scheme, parties.netloc, parties.path, requete, ""))
+
+
+def _suivi(url: str) -> bool:
+    try:
+        return any(PARAMETRES_SUIVI.match(k) for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    except ValueError:
+        return False
+
+
+def _https(url: str) -> bool:
+    try:
+        return urlsplit(url).scheme.lower() == "https"
+    except ValueError:
+        return False
+
+
+def rang_cible(cible: str, code: str) -> int:
+    """0 : cible propre à la commune (son chemin contient le code INSEE ou le slug « code-nom ») ; 1 : autre page du
+    site ; 2 : racine ou page d'accueil du site (avec ou sans paramètres de suivi)."""
+    try:
+        chemin = urlsplit(normaliser_page(cible)).path
+    except ValueError:
+        return 2
+    if code and code in chemin:
+        return 0
+    return 2 if chemin in GENERIQUES else 1
+
+
+def cle_lien(lien: dict) -> tuple:
+    """Ordre de choix du lien d'une commune (le plus petit gagne), déterministe :
+    1. cible propre à la commune avant une cible générique, puis cible sans paramètres de suivi ;
+    2. (les liens listés sont tous confirmés) ;
+    3. page source la plus propre : https avant http, sans paramètres de suivi, puis la plus courte, puis alphabétique ;
+    4. à égalité, la plus ancienne première vue."""
+    page, cible = lien["url_page_source"], lien.get("url_cible") or ""
+    vue = instant_iso(lien["premiere_vue"]) if lien.get("premiere_vue") else datetime.max.replace(tzinfo=timezone.utc)
+    return (rang_cible(cible, lien["code_insee"]), _suivi(cible), not _https(page), _suivi(page),
+            len(normaliser_page(page)), page, vue, cible)
+
+
+def grouper_communes(liens: list[dict]) -> list[dict]:
+    """Une entrée par commune (département et code INSEE) à partir des liens confirmés, une ligne par lien.
+
+    Chaque commune a UN lien retenu (cle_lien) : sa page source et sa cible, toutes deux sans paramètres de suivi
+    à l'affichage. apparu_le est la plus ancienne première vue de TOUS ses liens ; nouveau vaut vrai si l'un d'eux
+    est un lien nouveau. Tri commun : département, nom (sans accents ni casse), code INSEE.
     """
+    par_commune: dict[tuple[str, str], list[dict]] = {}
+    for lien in liens:
+        par_commune.setdefault((lien["dept"], lien["code_insee"]), []).append(lien)
+    sortie = []
+    for (dept, code), membres in par_commune.items():
+        choisi = min(membres, key=cle_lien)
+        vues = [instant_iso(m["premiere_vue"]) for m in membres if m.get("premiere_vue")]
+        sortie.append({
+            "dept": dept, "code_insee": code,
+            "nom_commune": next((m["nom_commune"] for m in membres if m["nom_commune"]), ""),
+            "page": sans_suivi(choisi["url_page_source"]),
+            "cible": sans_suivi(choisi["url_cible"]) if choisi.get("url_cible") else "",
+            "apparu_le": min(vues).isoformat() if vues else "",
+            "derniere_vue": max(vues).isoformat() if vues else "",
+            "nouveau": any(bool(m.get("nouveau")) for m in membres)})
+    return sorted(sortie, key=lambda c: (c["dept"], _sans_accents(c["nom_commune"]), c["nom_commune"].casefold(),
+                                         c["code_insee"]))
+
+
+def selection_communes(liens: list[dict], q: str, limit: int, offset: int) -> tuple[list[dict], int]:
+    """Communes filtrées par `q` (nom ou code INSEE, sans accents ni casse), triées, puis tranchées en communes.
+    Retourne (tranche, nombre de communes filtrées)."""
+    communes = grouper_communes(liens)
     cle = _sans_accents(q or "")
     if cle:
-        rows = [r for r in rows if cle in _sans_accents(r["nom_commune"]) or cle in _sans_accents(r["code_insee"])]
-    triees = trier_liens_confirmes(rows)
-    return triees[offset:offset + limit], len(triees)
+        communes = [c for c in communes if cle in _sans_accents(c["nom_commune"]) or cle in _sans_accents(c["code_insee"])]
+    return communes[offset:offset + limit], len(communes)
 
 
-def selection_nouveaux(rows: list[dict], depuis: datetime, limit: int) -> tuple[list[dict], int]:
-    """Liens nouveaux (nouveau et première vue >= depuis), du plus récent au plus ancien, puis département et commune."""
-    retenus = [r for r in rows if r.get("nouveau") and datetime.fromisoformat(r["premiere_vue"]) >= depuis]
-    triees = sorted(trier_liens_confirmes(retenus), key=lambda r: r["premiere_vue"], reverse=True)  # tri stable
+def selection_nouveaux(liens: list[dict], depuis: datetime, limit: int) -> tuple[list[dict], int]:
+    """Communes ayant un lien nouveau (première vue >= depuis). Seuls ces liens comptent pour le lien retenu et pour
+    « apparu le ». De la plus récente à la plus ancienne ; à égalité, ordre des communes (tri stable)."""
+    retenus = [l for l in liens if l.get("nouveau") and l.get("premiere_vue")
+               and instant_iso(l["premiere_vue"]) >= depuis]
+    triees = sorted(grouper_communes(retenus), key=lambda c: instant_iso(c["derniere_vue"]), reverse=True)
     return triees[:limit], len(triees)
 
 
@@ -108,11 +220,12 @@ class PublicationSource(Protocol):
     def depts(self) -> list[str]: ...                    # codes triés
     # communes avec lien : {dept, code_insee, nom_commune, url_page}, triées ; dept=None = tous ; inconnu = []
     def liens(self, dept: str | None = None) -> list[dict]: ...
-    # liens confirmés, une ligne par lien : {dept, code_insee, nom_commune, url_page_source, url_cible}. Filtre q
-    # (commune ou code INSEE) et dept (None = tous), tri commun ; renvoie la tranche [offset, offset+limit[ et le total
+    # communes avec un lien confirmé, une entrée par commune (voir grouper_communes) : {dept, code_insee, nom_commune,
+    # page, cible, apparu_le, derniere_vue, nouveau}. Filtre q (commune ou code INSEE) et dept (None = tous).
+    # Renvoie la tranche [offset, offset+limit[ en communes et le nombre de communes filtrées.
     def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]: ...
-    # liens nouvellement vus (nouveau = True, première vue >= depuis), plus récents d'abord : (tranche, total).
-    # Chaque lien porte premiere_vue (ISO) et nouveau, comme dans tous_les_liens.
+    # communes ayant un lien nouvellement vu (première vue >= depuis), plus récentes d'abord : (tranche, nombre de
+    # communes). Leurs pages sont les seules pages nouvelles.
     def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]: ...
     # None si département inconnu ; report=False / csv=False évitent de produire les champs lourds (alors vides)
     def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None: ...
@@ -196,11 +309,11 @@ class FileSource:
         return [{**l, "premiere_vue": vus[liens_vus.cle(l)][0], "nouveau": vus[liens_vus.cle(l)][1]} for l in lignes]
 
     def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
-        """Liens confirmés des départements publiés (relus des synthèses à chaque appel : source locale, sans cache)."""
+        """Communes à lien confirmé des départements publiés (relues des synthèses à chaque appel : source locale)."""
         lignes = self._lignes_publiees()
         if dept is not None:
             lignes = [l for l in lignes if l["dept"] == dept]
-        return selection_liens(lignes, q, limit, offset)
+        return selection_communes(lignes, q, limit, offset)
 
     def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]:
         return selection_nouveaux(self._lignes_publiees(), depuis, limit)

@@ -47,28 +47,28 @@
 
 <h2 class="fr-h4 fr-mt-6w" id="nouveaux-liens">Nouveaux liens</h2>
 {% if total_nouveaux %}
-<p class="fr-mb-2w" role="status">{{ total_nouveaux }} nouveau{{ 'x' if total_nouveaux > 1 }} lien{{ 's' if total_nouveaux > 1 }} depuis {{ fenetre }} jours.{% if total_nouveaux > nouveaux|length %} Les {{ nouveaux|length }} plus récents sont affichés ; le tableau complet ci-dessous indique aussi les liens nouveaux.{% endif %}</p>
+<p class="fr-mb-2w" role="status">{{ total_nouveaux }} commune{{ 's' if total_nouveaux > 1 }} avec un nouveau lien depuis {{ fenetre }} jours.{% if total_nouveaux > nouveaux|length %} Les {{ nouveaux|length }} plus récentes sont affichées ; le tableau complet ci-dessous indique aussi les nouveautés.{% endif %}</p>
 {% endif %}
 <div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
 <table>
-  <caption>Liens confirmés apparus depuis {{ fenetre }} jours, du plus récent au plus ancien</caption>
+  <caption>Communes avec un lien apparu depuis {{ fenetre }} jours, de la plus récente à la plus ancienne</caption>
   <thead><tr>
     <th scope="col">Apparu le</th><th scope="col">Département</th><th scope="col">Code INSEE</th>
-    <th scope="col">Nom de la commune</th><th scope="col">Page de la commune</th>
+    <th scope="col">Nom de la commune</th><th scope="col">Page de la commune où se trouve le lien</th>
   </tr></thead>
   <tbody>{% for n in nouveaux %}<tr>
     <td>{{ n.apparu_le|date or 'Non renseignée' }}</td>
     <td>{{ n.departement }}</td>
     <td>{{ n.code_insee }}</td>
     <td>{{ n.commune }}</td>
-    <td>{{ lien_externe(n.url_page_source) }}</td>
-  </tr>{% else %}<tr><td colspan="5">Aucun nouveau lien ces {{ fenetre }} derniers jours.</td></tr>{% endfor %}</tbody>
+    <td>{{ lien_externe(n.page) }}</td>
+  </tr>{% else %}<tr><td colspan="5">Aucune nouvelle commune ces {{ fenetre }} derniers jours.</td></tr>{% endfor %}</tbody>
 </table>
 </div></div></div></div>
 {% if total_nouveaux %}<p class="fr-mb-4w"><a class="fr-link" href="/#tous-les-liens">Voir le tableau complet des liens</a></p>{% endif %}
 
 <h2 class="fr-h4 fr-mt-6w" id="tous-les-liens" tabindex="-1">Tous les liens trouvés</h2>
-<p class="fr-mb-2w">Une ligne par page de commune où figure un lien vers « Vos questions ». Seuls les liens confirmés sont listés.</p>
+<p class="fr-mb-2w">Une ligne par commune : la page de la commune où figure un lien vers « Vos questions », et l'adresse visée. Seuls les liens confirmés sont listés.</p>
 
 <form method="get" action="/#tous-les-liens" role="search" aria-label="Filtrer les liens trouvés" class="fr-mb-4w">
   <div class="fr-grid-row fr-grid-row--gutters fr-grid-row--bottom">
@@ -97,25 +97,25 @@
 {% if alerte_liens %}<div class="fr-alert fr-alert--warning fr-alert--sm fr-mb-2w"><p>{{ alerte_liens }}</p></div>{% endif %}
 
 {% if liens_total %}
-<p class="fr-mb-2w">{{ liens_total }} résultat{{ 's' if liens_total > 1 }}, page {{ liens_page }} sur {{ liens_pages }}.</p>
+<p class="fr-mb-2w">{{ liens_total }} commune{{ 's' if liens_total > 1 }}, page {{ liens_page }} sur {{ liens_pages }}.</p>
 {% else %}
 <p class="fr-mb-2w" role="status">Aucun résultat pour cette recherche.</p>
 {% endif %}
 <p class="fr-mb-2w"><a class="fr-link" href="{{ url_csv }}">{{ 'Télécharger les résultats filtrés (CSV)' if q or dep else 'Télécharger tout (CSV)' }}</a></p>
 <div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
 <table>
-  <caption>Liens trouvés par commune, une ligne par page de commune où figure un lien vers Vos questions</caption>
+  <caption>Liens trouvés par commune, une ligne par commune avec sa page et son adresse visée</caption>
   <thead><tr>
     <th scope="col">Département</th><th scope="col">Code INSEE</th><th scope="col">Nom de la commune</th>
-    <th scope="col">Lien de la page de la commune où se trouve le lien vers Vos questions</th>
-    <th scope="col">Adresse visée (Vos questions)</th><th scope="col">Apparu le</th>
+    <th scope="col">Page de la commune où se trouve le lien vers Vos questions</th>
+    <th scope="col">Lien vers vosquestions</th><th scope="col">Apparu le</th>
   </tr></thead>
   <tbody>{% for l in liens %}<tr>
     <td>{{ l.departement }}</td>
     <td>{{ l.code_insee }}</td>
     <td>{{ l.commune }}</td>
-    <td>{{ lien_externe(l.url_page_source) }}</td>
-    <td>{{ lien_externe(l.url_cible) if l.url_cible else 'Non renseignée' }}</td>
+    <td>{{ lien_externe(l.page) }}</td>
+    <td>{{ lien_externe(l.cible) if l.cible else 'Non renseignée' }}</td>
     <td>{% if l.recent %}<span class="fr-badge fr-badge--sm fr-badge--info fr-badge--no-icon">nouveau</span> {% endif %}{{ l.apparu_le|date or 'Non renseignée' }}</td>
   </tr>{% else %}<tr><td colspan="6">Aucun résultat.</td></tr>{% endfor %}</tbody>
 </table>

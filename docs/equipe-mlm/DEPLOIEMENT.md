@@ -115,21 +115,63 @@ ne peut être lancée, arrêtée ou modifiée depuis les pages publiques.
 2. Relancez un déploiement (*Redeploy*) : la variable n'est lue qu'au démarrage.
 3. Adresse à diffuser : `https://<projet>.vercel.app/`.
 
-Ce qui est public (lecture seule, GET et HEAD uniquement) : la racine (liste des départements publiés, date de la
-dernière publication, recherche), la page de chaque département (`/departement/<code>`), son CSV
-(`/departement/<code>.csv`), la page « À propos » (`/a-propos`) et les ressources graphiques. Toute autre adresse reste
-protégée par défaut, et les formulaires ne sont jamais acceptés sur ces pages.
+### Routes publiques et protégées
 
-Sur la racine, sous le tableau des départements, le tableau « Tous les liens trouvés » liste chaque lien confirmé
-(une ligne par page de commune : département, code INSEE, nom de la commune, page où figure le lien, adresse visée),
-avec recherche par nom ou code INSEE, filtre par département et pages de 100 lignes. Le lien « Télécharger tout (CSV) »
-(`/resultats.csv`, mêmes filtres `q` et `dep`) exporte ces lignes ; il est plafonné à 200 000 lignes. Seuls les liens
-confirmés sont listés, jamais les cas « à vérifier » ni les erreurs.
+Routes publiques (lecture seule, GET et HEAD uniquement, `noindex`) :
 
-**Nouveaux liens.** Au-dessus du tableau complet, la section « Nouveaux liens » liste les liens confirmés apparus
-depuis moins de 30 jours (constante `FENETRE_NOUVEAUX_JOURS`), du plus récent au plus ancien, 50 au plus. Le tableau
-complet affiche la date « Apparu le » et le repère « nouveau » ; le CSV porte la colonne `apparu_le`. Comment cela
-fonctionne :
+| Adresse | Contenu |
+|---|---|
+| `/` | Liste des départements publiés, recherche, tableau « Tous les liens trouvés » (une ligne par commune) |
+| `/a-propos` | Page « À propos » |
+| `/resultats.csv` | CSV des communes à lien (une ligne par commune), filtres `q` et `dep` |
+| `/departement/<code>`, `/departement/<code>.csv` | Vue assainie d'un département et son CSV |
+| `/rapports` | Liste des rapports par département (dernière analyse de chacun) |
+| `/rapports/<code>` | Rapport d'un département (vue assainie, identique pour tous) |
+| `/rapports/<code>/communes.csv` | CSV des communes du département |
+| `/rapports/<code>/export.html` | Export HTML autonome, assaini (même contenu que la vue publique) |
+| `/rapport/<code>` | Ancienne adresse : redirigée (303) vers `/rapports/<code>` |
+| `/campagnes` | Historique : analyses **terminées** uniquement, sans journal ni identifiant d'exécution |
+| `/campagnes/<n>` | Détail d'une analyse terminée : dates, périmètre, nombre de communes, totaux par statut |
+| `/static/...` | Ressources graphiques |
+
+Une analyse en file, en cours, annulée ou en échec n'apparaît pas dans `/campagnes` et répond 404 sur `/campagnes/<n>`.
+Les totaux par statut d'une campagne sont calculés sur les départements dont la dernière publication tombe dans la
+période de l'analyse (pas de photographie par campagne en base).
+
+Routes protégées par le mot de passe (toute autre adresse l'est par défaut) :
+
+| Adresse | Contenu |
+|---|---|
+| `/tableau-de-bord` | Tableau de bord d'administration (chiffres, « Lancer une analyse ») |
+| `/analyse`, `/suivi`, `/api/etat`, `/arreter`, `/reprendre/<n>`, `/lancer` | Lancement, suivi, arrêt et reprise des analyses |
+| `/resultats` | Liste paginée des communes à lien, administrateur |
+| `/admin/campagnes`, `/admin/campagnes/<n>` | Historique complet (toutes les analyses) et détail avec journal |
+| `/admin/rapports/<code>` | Vue d'administration complète d'un département (détails techniques, liens écartés) |
+| `/csv/<code>`, `/csv/tous` | Anciens CSV par département et global |
+
+Le menu de l'administrateur, sur les pages publiques, ajoute « Campagnes (administration) » (`/admin/campagnes`). Sur les
+pages assainies (`/rapports`, `/campagnes`), il ne comporte aucun lien d'exploitation. Sans `MLM_LECTURE_PUBLIQUE`, les
+adresses `/rapports` et `/campagnes` restent protégées et montrent la vue d'administration complète, comme avant.
+
+Sur la racine, sous le tableau des départements, le tableau « Tous les liens trouvés » liste **une ligne par commune**
+(département, code INSEE, nom de la commune, page de la commune où figure le lien, lien vers Vos questions, date « Apparu
+le »). Pour une commune, un seul lien est retenu, de façon déterministe : 1° une cible propre à la commune (son chemin
+contient le code INSEE ou le slug) avant une cible générique (racine du site, avec ou sans `?utm_…`) ; 2° pour la page
+source, https avant http, sans paramètres de suivi (`utm_*`, `fbclid`, `gclid`), puis la plus courte, puis ordre
+alphabétique ; 3° à égalité, la plus ancienne première vue. Les adresses sont normalisées pour comparer (schéma, hôte en
+minuscules sans `www.` ni point final, sans fragment, sans `/` final, port par défaut retiré, paramètres de suivi
+retirés). « Apparu le » est la plus ancienne première vue de tous les liens de la commune.
+
+La pagination compte des communes (100 par page). Le compteur indique « N communes ». Le lien « Télécharger tout (CSV) »
+(`/resultats.csv`, mêmes filtres `q` et `dep`) exporte une ligne par commune, aux colonnes `departement_code`,
+`departement`, `code_insee`, `commune`, `page_source`, `url_cible`, `apparu_le` ; il est plafonné à 200 000 communes. Seuls
+les liens confirmés sont listés, jamais les cas « à vérifier » ni les erreurs.
+
+**Nouveaux liens.** Au-dessus du tableau complet, la section « Nouveaux liens » liste les communes ayant un lien
+confirmé apparu depuis moins de 30 jours (constante `FENETRE_NOUVEAUX_JOURS`), une ligne par commune, de la plus récente à
+la plus ancienne, 50 au plus. Seuls les liens nouveaux comptent pour le lien retenu et pour « Apparu le ». Le tableau
+complet affiche la date « Apparu le » et le repère « nouveau » (date dans la fenêtre) ; le CSV porte la colonne
+`apparu_le`. Comment cela fonctionne :
 
 - Postgres : la table `liens_vus` garde, pour chaque lien (département, code INSEE, page, cible), la date de sa première
   apparition. Elle est alimentée par la publication (`publish`) : un lien déjà connu n'est jamais réinséré, un lien
