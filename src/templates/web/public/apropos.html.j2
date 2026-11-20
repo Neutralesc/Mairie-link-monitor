@@ -1,0 +1,23 @@
+{% extends 'web/public/base.html.j2' %}
+{% block titre %}À propos{% endblock %}
+{% block contenu %}
+<h1>À propos de ces résultats</h1>
+<p class="fr-text--lead">Cette page explique d'où viennent les résultats, comment ils sont produits et ce qu'ils ne permettent pas de conclure.</p>
+
+<h2 class="fr-h4">Source</h2>
+<p>Les communes et leurs sites officiels viennent de référentiels publics. Les résultats portent sur les pages publiques de ces sites, lues automatiquement.</p>
+
+<h2 class="fr-h4">Méthode</h2>
+<p>Pour chaque site, le programme parcourt les pages publiques et repère les liens vers « Vos questions » (vosquestions.ecologie-territoires.gouv.fr).</p>
+<ul>
+  <li>« Lien trouvé » : un lien vers « Vos questions » a été repéré sur le site de la commune.</li>
+  <li>« Lien probable » ou « à vérifier » : la détection n'est pas certaine, ou la lecture du site est incomplète.</li>
+  <li>« Aucun lien » : le site a été lu entièrement sans lien détecté.</li>
+</ul>
+
+<h2 class="fr-h4">Limites</h2>
+<p>Une absence de lien ne prouve pas qu'il n'existe pas : le site peut être inaccessible, bloquer les robots, n'avoir été lu qu'en partie, ou contenir un lien que la détection n'a pas trouvé. Les résultats ne sont pas exhaustifs et ne constituent pas un avis officiel.</p>
+
+<h2 class="fr-h4">Mises à jour</h2>
+<p>Chaque département affiche la date de sa dernière publication. Une analyse plus récente remplace la précédente.</p>
+{% endblock %}

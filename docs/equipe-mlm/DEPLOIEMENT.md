@@ -105,6 +105,30 @@ l'onglet *Actions* de GitHub. Les journaux n'affichent jamais les valeurs des se
   `MLM_GH_TOKEN` dans Vercel, puis redéployez.
 - **Changer le mot de passe** : modifiez `MLM_PASSWORD` dans Vercel, puis redéployez.
 
+## Ouvrir la lecture publique (racine sans mot de passe)
+
+Facultatif. Avec cette option, l'adresse racine du site affiche les résultats publiés, sans mot de passe. Aucune analyse
+ne peut être lancée, arrêtée ou modifiée depuis les pages publiques.
+
+1. Vercel : *Settings*, *Environment Variables*, ajoutez `MLM_LECTURE_PUBLIQUE` avec la valeur `1` (environnement
+   *Production*).
+2. Relancez un déploiement (*Redeploy*) : la variable n'est lue qu'au démarrage.
+3. Adresse à diffuser : `https://<projet>.vercel.app/`.
+
+Ce qui est public (lecture seule, GET et HEAD uniquement) : la racine (liste des départements publiés, date de la
+dernière publication, recherche), la page de chaque département (`/departement/<code>`), son CSV
+(`/departement/<code>.csv`), la page « À propos » (`/a-propos`) et les ressources graphiques. Toute autre adresse reste
+protégée par défaut, et les formulaires ne sont jamais acceptés sur ces pages.
+
+Accès à l'administration : la page publique propose un lien « Espace réservé » vers `/analyse`, qui demande le mot de
+passe. Le navigateur qui a fourni le bon mot de passe voit ensuite le menu complet sur la racine et sur les pages
+publiques. Un identifiant invalide sur une page publique est simplement traité comme un visiteur.
+
+Les pages publiques sont marquées `noindex`, et la réponse varie selon l'identifiant (`Vary: Authorization`, sans cache).
+
+Pour couper : supprimez `MLM_LECTURE_PUBLIQUE` (ou donnez-lui une valeur autre que `1`, `true` ou `oui`), puis relancez
+un déploiement. La racine redemande alors le mot de passe, comme avant.
+
 ## Durcissement recommandé
 
 - **Environnement GitHub** (facultatif) : dans *Settings → Environments*, créez un environnement limité à la branche

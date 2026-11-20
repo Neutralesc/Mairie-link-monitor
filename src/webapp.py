@@ -83,6 +83,9 @@ ETATS_ANALYSE = {"inactif": "Aucune analyse en cours", "en_cours": "En cours", "
                  "echec": "Échec", "annule": "Arrêtée"}
 ETAT_DE_ANALYSE = {"terminee": "termine", "echec": "echec", "annulee": "annule"}
 MIME_CSV = "text/csv; charset=utf-8"
+# Lecture publique (MLM_LECTURE_PUBLIQUE) : liste blanche des seules routes ouvertes sans mot de passe (GET et HEAD).
+EN_TETES_PUBLICS = {"X-Robots-Tag": "noindex, nofollow", "Vary": "Authorization"}
+MSG_PUBLIC_INDISPONIBLE = "Les résultats ne sont pas disponibles pour le moment. Réessayez plus tard."
 
 
 def static_file(rel: str) -> Path | None:
@@ -226,6 +229,22 @@ _ENV.globals.update(STATUTS=STATUTS, STATUTS_ANALYSE=STATUTS_ANALYSE, ETATS_ANAL
 
 def _rendre(modele: str, **ctx) -> str:
     return _ENV.get_template(f"web/{modele}.html.j2").render(**ctx)
+
+
+def _rendre_public(modele: str, **ctx) -> str:
+    """Pages publiques (lecture seule) : gabarits web/public, menu adaptatif selon `admin`."""
+    return _ENV.get_template(f"web/public/{modele}.html.j2").render(**ctx)
+
+
+def route_publique(chemin: str) -> tuple[str, str] | None:
+    """Liste blanche des routes publiques : (genre, code) ou None. Tout chemin absent de la liste est protégé."""
+    if chemin == "/":
+        return ("accueil", "")
+    if chemin == "/a-propos":
+        return ("apropos", "")
+    if m := re.fullmatch(rf"/departement/({CODE_URL})(\.csv)?", chemin):
+        return ("csv" if m.group(2) else "departement", m.group(1))
+    return None
 
 
 def _synthese():
@@ -391,6 +410,17 @@ def _chiffres(resumes: list[dict] | None) -> list[tuple[str, str]]:
     return list(zip(valeurs, ["départements publiés", "communes", "communes avec un lien", "communes à vérifier"]))
 
 
+def filtrer_departements(resumes: list[dict], q: str) -> list[dict]:
+    """Départements dont le code ou le nom contient `q` (sans accents ni casse)."""
+    cle = sans_accents(q)
+    return [r for r in resumes if not cle or cle in sans_accents(str(r["code"])) or cle in sans_accents(str(r.get("nom", "")))]
+
+
+def derniere_publication(resumes: list[dict]) -> str:
+    """Date (ISO) la plus récente parmi les départements publiés ; '' s'il n'y en a aucune."""
+    return max((str(r.get("date") or "") for r in resumes), default="")
+
+
 def resultats(source: PublicationSource, params: dict[str, list[str]]) -> str:
     """Page « Résultats » : communes avec lien, filtrées par département et recherche, paginées."""
     dept = params.get("dept", [""])[0].strip()
@@ -418,23 +448,42 @@ def resultats(source: PublicationSource, params: dict[str, list[str]]) -> str:
 
 # ----------------------------------------------------------------- serveur
 
-def make_handler(root: Path, runner, password: str, source: PublicationSource | None = None):
+def make_handler(root: Path, runner, password: str, source: PublicationSource | None = None,
+                 lecture_publique: bool = False):
     source = source or FileSource(root)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             log.info("%s %s", self.address_string(), fmt % args)
 
+        publique = False  # vrai pour une route de la liste blanche, lecture publique activée
+
+        def parse_request(self) -> bool:
+            """Routes publiques : 405 pour tout verbe autre que GET et HEAD (aucun formulaire, même avec Origin valide)."""
+            if not super().parse_request():
+                return False
+            self.publique = lecture_publique and route_publique(urlsplit(self.path).path) is not None
+            if self.publique and self.command not in ("GET", "HEAD"):
+                self.close_connection = True
+                self.send(405, "Méthode non autorisée.", "text/plain; charset=utf-8", {"Allow": "GET, HEAD"})
+                return False
+            return True
+
         # --- réponses ---
 
         def send(self, status: int, body: str | bytes, ctype: str = "text/html; charset=utf-8", extra: dict | None = None):
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
-            for k, v in {"Content-Type": ctype, "Content-Length": str(len(data)), "X-Content-Type-Options": "nosniff",
-                         "Cache-Control": "no-store", **EN_TETES_SECURITE, **(extra or {})}.items():
+            entetes = {"Content-Type": ctype, "Content-Length": str(len(data)), "X-Content-Type-Options": "nosniff",
+                       "Cache-Control": "no-store", **EN_TETES_SECURITE}
+            if self.publique:
+                entetes.update(EN_TETES_PUBLICS)  # noindex ; réponse dépendant de l'Authorization (pas de cache partagé)
+            entetes.update(extra or {})
+            for k, v in entetes.items():
                 self.send_header(k, v)
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != "HEAD":
+                self.wfile.write(data)
 
         def page(self, modele: str, status: int = 200, **ctx):
             self.send(status, _rendre(modele, **ctx))
@@ -457,7 +506,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
 
         # --- contrôles communs ---
 
-        def authorized(self) -> bool:
+        def identifiants_valides(self) -> bool:
+            """Vrai sans mot de passe configuré, ou si l'en-tête Authorization porte le bon mot de passe."""
             if not password:
                 return True
             auth = self.headers.get("Authorization", "")
@@ -468,6 +518,11 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                     given = ""
                 if hmac.compare_digest(given.encode(), password.encode()):
                     return True
+            return False
+
+        def authorized(self) -> bool:
+            if self.identifiants_valides():
+                return True
             self.erreur(401, "Accès protégé", "Mot de passe requis.",
                         extra={"WWW-Authenticate": 'Basic realm="Liens Vos questions", charset="UTF-8"'})
             return False
@@ -498,6 +553,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             chemin = urlsplit(self.path).path
             if chemin.startswith(STATIC_URL):  # sans mot de passe : ressources publiques uniquement
                 return self.serve_static(chemin)
+            if self.publique:  # liste blanche : sans mot de passe ; un identifiant valide donne la vue d'administration
+                return self.traiter_publique(chemin, parse_qs(urlsplit(self.path).query, keep_blank_values=True))
             if not self.authorized():
                 return
             try:
@@ -597,6 +654,59 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                 return self.erreur(404, "Page introuvable", "Aucun fichier CSV pour ce département.")
             return self.csv_reponse(data, nom)
 
+        # --- pages publiques (lecture seule) ---
+
+        def do_HEAD(self):  # noqa: N802
+            chemin = urlsplit(self.path).path
+            if not self.publique:
+                return self.send_error(501, f"Unsupported method ({self.command!r})")
+            self.traiter_publique(chemin, parse_qs(urlsplit(self.path).query, keep_blank_values=True))
+
+        def traiter_publique(self, chemin: str, params: dict):
+            admin = self.identifiants_valides()
+            genre, code = route_publique(chemin)
+            try:
+                if genre == "accueil" and admin:
+                    return self.accueil()  # tableau de bord complet, réservé à l'identifiant valide
+                if genre == "accueil":
+                    return self.public_accueil(params, admin)
+                if genre == "apropos":
+                    return self.public_apropos(admin)
+                return self.public_departement(code, admin, csv=genre == "csv")
+            except SourceIndisponible:
+                self.public_erreur(503, "Service indisponible", MSG_PUBLIC_INDISPONIBLE, admin)
+            except Exception:  # noqa: BLE001 - jamais de trace Python côté visiteur
+                log.exception("erreur sur page publique %s", chemin)
+                self.public_erreur(500, "Erreur interne", "Une erreur interne s'est produite.", admin)
+
+        def page_publique(self, modele: str, admin: bool, status: int = 200, **ctx):
+            self.send(status, _rendre_public(modele, admin=admin, **ctx))
+
+        def public_accueil(self, params: dict, admin: bool):
+            q = params.get("q", [""])[0][:RECHERCHE_MAX].strip()
+            publies = [r for r in source.resumes() if re.fullmatch(CODE_URL, str(r.get("code", "")))]
+            self.page_publique("accueil", admin, actif="accueil", total=len(publies),
+                               resumes=filtrer_departements(publies, q), q=q, derniere=derniere_publication(publies))
+
+        def public_apropos(self, admin: bool):
+            try:
+                derniere = derniere_publication(source.resumes())
+            except SourceIndisponible:
+                derniere = None  # la page À propos reste lisible ; la date est signalée comme indisponible
+            self.page_publique("apropos", admin, actif="apropos", derniere=derniere)
+
+        def public_departement(self, code: str, admin: bool, csv: bool):
+            synth = source.synthese(code)
+            if synth is None:
+                return self.public_erreur(404, "Page introuvable", "Aucun résultat publié pour ce département.", admin)
+            if csv:
+                return self.csv_reponse(csv_communes(synth), f"communes_{code}.csv")
+            self.page_publique("departement", admin, actif="", synth=synth, vue=vue_compte_rendu(synth), autonome=True,
+                               lecture=True, url_csv=f"/departement/{code}.csv")
+
+        def public_erreur(self, status: int, titre: str, message: str, admin: bool):
+            self.page_publique("erreur", admin, status, code=status, titre=titre, message=message, actif="", derniere=None)
+
         # --- POST ---
 
         def do_POST(self):  # noqa: N802
@@ -658,8 +768,9 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
 
 
 def serve(root: Path, host: str, port: int, password: str, runner: Runner | None = None,
-          source: PublicationSource | None = None) -> ThreadingHTTPServer:
+          source: PublicationSource | None = None, lecture_publique: bool = False) -> ThreadingHTTPServer:
     if host not in LOCAL_HOSTS and not password:
         raise ValueError("Pour partager l'application sur le réseau, définissez un mot de passe "
                          "(config.toml : mot_de_passe_web) ; sans mot de passe, elle n'écoute que sur ce poste.")
-    return ThreadingHTTPServer((host, port), make_handler(root, runner or Runner(root), password, source))
+    return ThreadingHTTPServer((host, port), make_handler(root, runner or Runner(root), password, source,
+                                                          lecture_publique=lecture_publique))
