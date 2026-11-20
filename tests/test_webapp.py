@@ -60,6 +60,14 @@ class WebTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8")
 
+    def location(self, path):
+        req = urllib.request.Request(self.base + path)
+        try:
+            self.opener.open(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            return e.headers.get("Location")
+        return None
+
     def wait_log(self, text):
         for _ in range(50):
             if text in self.runner.tail():
@@ -74,21 +82,29 @@ class LocalTests(WebTests):
         self.assertEqual(status, 200)
         self.assertIn("Lancer une analyse", html)
         self.assertIn('lang="fr"', html)
-        self.assertIn('<label for="dept">', html)
-        self.assertIn("Aucun département analysé", html)
+        self.assertIn("départements publiés", html)                              # chiffres de l'accueil
+        self.assertIn("Aucune analyse pour le moment.", html)
+        self.assertIn('href="/analyse"', html)
+        self.assertIn('name="departement"', self.call("/analyse")[1])            # le choix des départements est sur /analyse
 
     def test_lancer_suivre_arreter(self):
         status, _ = self.call("/lancer", {"dept": "60 1", "reprise": "1"})
         self.assertEqual(status, 303)
         self.wait_log("ARGS --dept 60 01 --resume")
-        status, html = self.call("/")
+        accueil = self.call("/")[1]
+        self.assertIn("Une analyse est en cours", accueil)                      # l'accueil renvoie vers le suivi
+        self.assertIn('href="/suivi"', accueil)
+        status, html = self.call("/suivi")
         self.assertIn("Analyse en cours : 60 01 (reprise)", html)
         self.assertNotIn('http-equiv="refresh"', html)                          # RGAA 13.1 : pas de rechargement imposé
-        self.assertIn('id="actualiser-auto"', html)
+        self.assertNotIn("actualiser-auto", html)                               # ... ni de rechargement automatique
+        self.assertIn('href="/suivi"', html)                                    # actualisation manuelle : lien « Actualiser »
+        self.assertIn("Actualiser", html)
         self.assertEqual(self.call("/lancer", {"dept": "80"})[0], 409)          # une seule analyse à la fois
         self.assertEqual(self.call("/arreter", {})[0], 303)
         self.runner.proc.wait(5)
-        self.assertNotIn("Analyse en cours", self.call("/")[1])
+        self.assertNotIn("Analyse en cours", self.call("/suivi")[1])
+        self.assertNotIn("Une analyse est en cours", self.call("/")[1])
 
     def test_saisies_refusees(self):
         self.assertEqual(self.call("/lancer", {"dept": "60; rm -rf /"})[0], 400)
@@ -116,12 +132,15 @@ class LocalTests(WebTests):
                                           "type_lien": "lien"}])
         csvio.write_rows(p.result_csv, [{"code_insee": "60001", "url_page": "https://a.fr/"}])
         history.record(p, history.db_path(self.root))
-        html = self.call("/")[1]
-        self.assertIn('href="/rapport/60"', html)
-        self.assertIn('href="/csv/60"', html)
-        status, html = self.call("/rapport/60")
+        liste = self.call("/rapports")[1]
+        self.assertIn('href="/rapports/60"', liste)                             # page « Rapports » : un rapport par département
+        self.assertIn('href="/rapports/60/communes.csv"', liste)
+        status, html = self.call("/rapports/60")
         self.assertEqual(status, 200)
         self.assertIn("Communes avec un lien (1)", html)
+        # Ancienne adresse : redirigée vers la page du département publié, 404 pour un département non publié.
+        self.assertEqual(self.call("/rapport/60")[0], 303)
+        self.assertEqual(self.location("/rapport/60"), "/rapports/60")
         status, body = self.call("/csv/60")
         self.assertEqual((status, body.splitlines()[0]), (200, "\ufeffcode_insee;url_page"))   # BOM : accents corrects dans Excel
         for bad in ("/rapport/80", "/rapport/..%2f..", "/csv/../config", "/inconnu"):

@@ -1,0 +1,38 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Résultats{% endblock %}
+{% block contenu %}
+<h1>Résultats</h1>
+<p class="fr-text--lead">{{ libelle }}</p>
+<form method="get" action="/resultats" role="search" class="fr-mb-4w">
+  <div class="fr-grid-row fr-grid-row--gutters fr-grid-row--bottom">
+    <div class="fr-col-12 fr-col-md-3"><div class="fr-select-group">
+      <label class="fr-label" for="dept">Département</label>
+      <select class="fr-select" id="dept" name="dept"><option value="">Tous les départements</option>{% for d in depts %}<option value="{{ d }}"{% if d == dept %} selected{% endif %}>{{ d }}</option>{% endfor %}</select>
+    </div></div>
+    <div class="fr-col-12 fr-col-md-5"><div class="fr-input-group">
+      <label class="fr-label" for="q">Rechercher une commune ou un code INSEE</label>
+      <input class="fr-input" id="q" name="q" type="text" value="{{ q|echappe }}">
+    </div></div>
+    <div class="fr-col-12 fr-col-md-4">
+      <button class="fr-btn" type="submit">Rechercher</button>
+      <a class="fr-link" href="/resultats">Réinitialiser</a>
+    </div>
+  </div>
+</form>
+<p role="status"><strong>{{ n }} commune{{ 's' if n > 1 }} avec lien</strong></p>
+{% if base_vide and dept %}
+<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucune commune avec lien publiée pour le département {{ dept }}.</p></div>
+{% elif base_vide %}
+<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucun résultat publié pour le moment : lancez une analyse depuis le menu Analyses.</p></div>
+{% elif not lignes %}
+<div class="fr-alert fr-alert--info fr-mb-4w" role="status"><p>Aucune commune ne correspond à votre recherche.</p></div>
+{% else %}
+<div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>{{ libelle }}</caption>
+<thead><tr><th scope="col">Département</th><th scope="col">Commune</th><th scope="col">Code INSEE</th><th scope="col">Page du lien</th></tr></thead>
+<tbody>{% for l in tranche %}<tr><td>{{ l.dept }}</td><td>{{ l.nom_commune }}</td><td>{{ l.code_insee }}</td><td>{% if l.url_page|est_http %}<a href="{{ l.url_page }}" rel="noopener noreferrer" target="_blank">{{ l.url_page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.url_page }}{% endif %}</td></tr>
+{% endfor %}</tbody></table>
+</div></div></div></div>
+{% if pagination %}{{ pagination|safe }}{% endif %}
+{% endif %}
+{% endblock %}

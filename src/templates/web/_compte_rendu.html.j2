@@ -1,0 +1,152 @@
+{# Compte rendu départemental lisible : partagé par la page web (accordéons DSFR) et l'export autonome (details/summary, sans JS).
+   Consultation seule : aucun formulaire. Variables : synth, vue (webapp.vue_compte_rendu), autonome, filtre, url_html, url_csv. #}
+{% set d = synth.departement %}
+{% set camp = synth.campagne or {} %}
+{% macro section(id, titre, ouvert=False) %}
+{% if autonome %}
+<details class="fr-mb-2w"{% if ouvert %} open{% endif %}><summary class="fr-mb-1w"><h2 class="fr-h5 fr-mb-0">{{ titre }}</h2></summary><div class="fr-pl-2w">{{ caller() }}</div></details>
+{% else %}
+<section class="fr-accordion"><h2 class="fr-accordion__title"><button type="button" class="fr-accordion__btn" aria-expanded="{{ 'true' if ouvert else 'false' }}" aria-controls="{{ id }}">{{ titre }}</button></h2>
+<div class="fr-collapse{% if ouvert %} fr-collapse--expanded{% endif %}" id="{{ id }}">{{ caller() }}</div></section>
+{% endif %}
+{% endmacro %}
+{% macro techniques(id, communes) %}
+{% call section(id, 'Détails techniques') %}
+{% if communes %}
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Valeurs brutes enregistrées pour les sites de cette section</caption>
+<thead><tr><th scope="col">Commune</th><th scope="col">Site</th><th scope="col">Statut</th><th scope="col">Pages lues</th><th scope="col">Limites</th><th scope="col">Erreurs</th></tr></thead>
+<tbody>{% for c in communes %}{% for s in c.sites %}<tr>
+  <th scope="row">{{ c.nom }}</th><td>{{ s.domaine }}</td><td>{{ s.statut }}{% if s.cause %} / {{ s.cause }}{% endif %}</td><td>{{ s.nb_pages }}</td>
+  <td>{{ s.limites if s.limites is string else (s.limites or [])|join(', ') }}</td><td>{{ s.erreurs if s.erreurs is string else (s.erreurs or [])|join(' | ') }}</td>
+</tr>{% endfor %}{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<p>Rien à signaler.</p>{% endif %}
+{% endcall %}
+{% endmacro %}
+{% macro site(s) %}{{ s.url_depart or s.domaine }}{% if s.tls_non_verifie %} <span class="fr-tag fr-tag--sm">certificat non vérifié</span>{% endif %}{{ tags_source(s.source) }}{% endmacro %}
+{% macro tags_source(source) %}{% if source == 'decouverte' %} <span class="fr-tag fr-tag--sm">Site trouvé automatiquement — à vérifier</span>{% elif source == 'correction' %} <span class="fr-tag fr-tag--sm">Adresse corrigée</span>{% endif %}{% endmacro %}
+{% macro badge_verification(v) %}{% if v == 'ok' %}<p class="fr-badge fr-badge--sm fr-badge--success fr-badge--no-icon fr-mb-0">Vérifié</p>{% elif v == 'faux' %}<p class="fr-badge fr-badge--sm fr-badge--error fr-badge--no-icon fr-mb-0">Faux positif</p>{% else %}<p class="fr-badge fr-badge--sm fr-badge--info fr-badge--no-icon fr-mb-0">À vérifier</p>{% endif %}{% endmacro %}
+
+<h1>{{ d.nom }} ({{ d.code }})</h1>
+<p class="fr-text--lead">Analyse du {{ (camp.fin or camp.debut)|date }}{% if camp.statut == 'interrompue' %} (interrompue : résultats partiels){% endif %}.</p>
+<div class="fr-callout fr-mb-3w"><p class="fr-callout__text">{{ vue.phrase }}</p></div>
+
+<div class="fr-grid-row fr-grid-row--gutters fr-mb-3w">
+  {% for lib, modif, n in [('Lien trouvé', 'success', vue.nb_liens), ('À vérifier', 'warning', vue.nb_verifier), ('Aucun lien', 'info', vue.nb_aucun), ('Non analysables', 'error', vue.nb_non)] %}
+  <div class="fr-col-6 fr-col-md-3"><div class="fr-tile fr-tile--sm">
+    <div class="fr-tile__body"><div class="fr-tile__content">
+      <p class="fr-h2 fr-mb-1w">{{ n }}</p>
+      <p class="fr-badge fr-badge--{{ modif }} fr-badge--no-icon fr-mb-0">{{ lib }}</p>
+    </div></div>
+  </div></div>
+  {% endfor %}
+</div>
+
+{% if url_html and not autonome %}{# l'export autonome n'a pas de serveur derrière lui : pas de boutons #}
+<ul class="fr-btns-group fr-btns-group--inline-md fr-mb-3w">
+  <li><a class="fr-btn" href="{{ url_html }}">Télécharger (HTML)</a></li>
+  {% if url_csv %}<li><a class="fr-btn fr-btn--secondary" href="{{ url_csv }}">Télécharger (CSV)</a></li>{% endif %}
+</ul>
+{% endif %}
+{% if autonome %}<style>summary{cursor:pointer}</style>{% endif %}
+
+<div class="fr-callout fr-mb-3w"><p class="fr-callout__text">Ce compte rendu décrit uniquement ce qui a été observé pendant l'analyse. Il ne garantit pas l'exhaustivité : un site lu partiellement ou inaccessible ne permet pas de conclure à l'absence de lien.</p></div>
+
+{% call section('sec-liens', '1. Communes avec un lien (' ~ vue.nb_liens ~ ')', True) %}
+{% if vue.liens %}
+<div class="fr-table fr-table--no-scroll"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Liens vers Vos questions trouvés sur les sites des communes</caption>
+<thead><tr><th scope="col">Commune</th><th scope="col">Page où le lien apparaît</th><th scope="col">Texte du lien</th><th scope="col">Vérification</th></tr></thead>
+<tbody>{% for l in vue.liens %}<tr><th scope="row">{{ l.commune }}{{ tags_source('decouverte' if l.site_a_verifier else None) }}</th>
+  <td>{% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}</td>
+  <td>{{ l.texte }}</td>
+  <td>{{ badge_verification(l.verification) }}{% if l.remarque %}<p class="fr-text--xs fr-mb-0">{{ l.remarque }}</p>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<p>Aucune commune avec un lien confirmé.</p>{% endif %}
+{% if vue.ecartes %}
+{% call section('sec-ecartes', 'Liens écartés après vérification (' ~ vue.ecartes|length ~ ')') %}
+<ul>{% for l in vue.ecartes %}<li><strong>{{ l.commune }}</strong> : {% if l.page|est_http %}<a href="{{ l.page }}" rel="noopener noreferrer" target="_blank">{{ l.page }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.page }}{% endif %}
+  {{ badge_verification('faux') }}{% if l.remarque %}<p class="fr-text--xs fr-mb-0">{{ l.remarque }}</p>{% endif %}</li>{% endfor %}</ul>
+{% endcall %}
+{% endif %}
+{{ techniques('tech-liens', vue.communes_techniques.liens) }}
+{% endcall %}
+
+{% call section('sec-verifier', '2. À vérifier (' ~ vue.nb_verifier ~ ')', True) %}
+{% if vue.verifier %}
+<p>Ces communes demandent un contrôle manuel : un lien est probable, ou le site n'a pas été lu en entier.</p>
+<ul>{% for v in vue.verifier %}<li><strong>{{ v.commune }}</strong> : {{ v.raison }}</li>{% endfor %}</ul>
+{% else %}<p>Aucune commune à vérifier.</p>{% endif %}
+{{ techniques('tech-verifier', vue.communes_techniques.verifier) }}
+{% endcall %}
+
+{% call section('sec-non', '3. Sites non analysables (' ~ vue.nb_non ~ ')', True) %}
+{% for g in vue.non_analysables %}
+<h3 class="fr-h6 fr-mb-1w">{{ g.titre }} ({{ g.communes|length }})</h3>
+<p class="fr-mb-1w">{{ g.explication }}</p>
+<p class="fr-mb-1w"><strong>À faire :</strong> {{ g.conseil }}</p>
+<ul>{% for c in g.communes %}<li>{{ c.nom }}{% if c.sites %} — {% for s in c.sites %}{{ site(s) }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</li>{% endfor %}</ul>
+{% else %}<p>Aucun site non analysable.</p>{% endfor %}
+{{ techniques('tech-non', vue.non_analysables|map(attribute='communes')|sum(start=[])) }}
+{% endcall %}
+
+{% call section('sec-aucun', '4. Aucun lien trouvé (' ~ vue.nb_aucun ~ ')') %}
+{% if vue.aucun %}<p>Le site de ces communes a été lu en entier et ne contient pas de lien vers Vos questions.</p>
+<p>{{ vue.aucun|join(', ') }}</p>{% else %}<p>Aucune commune.</p>{% endif %}
+{{ techniques('tech-aucun', vue.communes_techniques.aucun) }}
+{% endcall %}
+
+{% call section('sec-sans-site', '5. Communes sans site identifié (' ~ vue.nb_sans_site ~ ')') %}
+{% if vue.sans_site %}<p>L'annuaire ne donne aucun site officiel pour ces communes.</p><p>{{ vue.sans_site|join(', ') }}</p>
+{% else %}<p>Aucune commune.</p>{% endif %}
+{% endcall %}
+
+{% call section('sec-tout', 'Tableau complet des communes (' ~ vue.n ~ ')') %}
+<div class="fr-grid-row fr-grid-row--gutters fr-mb-3w">
+  {% for code, (libelle, modif) in STATUTS.items() %}
+  <div class="fr-col-12 fr-col-sm-6 fr-col-md-3">
+    <div class="fr-card fr-p-2w">
+      <p class="fr-h3 fr-mb-1w">{{ synth.totaux.get(code, 0) }}</p>
+      <p class="fr-badge fr-badge--sm{% if modif %} fr-badge--{{ modif }}{% endif %} fr-badge--no-icon fr-mb-0">{{ libelle }}</p>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% if filtre %}
+<div class="fr-select-group fr-mb-2w" id="groupe-filtre-statut" hidden>
+  <label class="fr-label" for="filtre-statut">Filtrer les communes par statut</label>
+  <select class="fr-select" id="filtre-statut">
+    <option value="">Tous les statuts</option>
+    {% for code, (libelle, modif) in STATUTS.items() %}<option value="{{ code }}">{{ libelle }}</option>{% endfor %}
+  </select>
+</div>
+<p class="fr-text--xs fr-mb-2w" id="resultat-filtre" aria-live="polite"></p>
+{% endif %}
+<div class="fr-table fr-table--no-scroll" id="table-communes">
+  <div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+  <table>
+    <caption>Communes du département {{ d.nom }} ({{ d.code }}) et résultat de l'analyse</caption>
+    <thead><tr>
+      <th scope="col">Commune</th><th scope="col">Code INSEE</th><th scope="col">Statut</th>
+      <th scope="col">Liens trouvés</th><th scope="col">Détail</th>
+    </tr></thead>
+    <tbody>
+    {% for c in synth.communes %}
+    {% set libelle, modif = STATUTS.get(c.statut, (c.statut, '')) %}
+    <tr data-statut="{{ c.statut }}">
+      <th scope="row">{{ c.nom }}</th>
+      <td>{{ c.code_insee }}</td>
+      <td><p class="fr-badge fr-badge--sm{% if modif %} fr-badge--{{ modif }}{% endif %} fr-badge--no-icon fr-mb-0">{{ libelle }}</p></td>
+      <td>{% if c.liens_confirmes %}<ul class="fr-raw-list">{% for l in c.liens_confirmes %}<li>
+        {% if l.url_cible|est_http %}<a href="{{ l.url_cible }}" rel="noopener noreferrer" target="_blank">{{ l.texte or l.url_cible }}<span class="fr-sr-only"> (nouvelle fenêtre)</span></a>{% else %}{{ l.texte or l.url_cible }}{% endif %}</li>
+      {% endfor %}</ul>{% else %}-{% endif %}
+        {% if c.nb_liens_incertains %}<p class="fr-text--xs fr-mb-0">{{ c.nb_liens_incertains }} lien(s) incertain(s)</p>{% endif %}</td>
+      <td>{{ c.detail or '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">Aucune commune pour ce département.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div></div></div>
+</div>
+{% endcall %}

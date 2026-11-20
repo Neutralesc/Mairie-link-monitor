@@ -17,7 +17,7 @@ from pathlib import Path
 
 CONFIG_VERSION = 4
 STEPS = ("inventory", "verify", "discover", "crawl", "plateformes", "export")
-DEFAULT_STEPS = ("inventory", "discover", "crawl", "plateformes", "export")     # verify : diagnostic facultatif, non nécessaire
+DEFAULT_STEPS = ("inventory", "discover", "crawl", "export")     # verify : diagnostic facultatif ; plateformes : disponible, non lancée par défaut
 EXPORT_MODES = ("une_page_par_commune", "toutes_les_pages")
 
 
@@ -35,7 +35,9 @@ OPTIONS: list[Option] = [
     Option("contact", "contact", "", "Votre e-mail ou URL de contact : ajouté au User-Agent des requêtes (recommandé)."),
     Option("demander_contact", "ask_contact", True,
            "true = le programme demande l'e-mail de contact au lancement tant qu'il n'est pas renseigné."),
-    Option("etapes", "steps", list(DEFAULT_STEPS), "Étapes exécutées : inventory, verify, discover, crawl, plateformes, export."),
+    Option("etapes", "steps", list(DEFAULT_STEPS),
+           "Étapes exécutées : inventory, verify, discover, crawl, plateformes, export. Par défaut : inventory, discover, "
+           "crawl, export (verify facultatif ; plateformes = PanneauPocket/Illiwap, à ajouter ici si voulu)."),
     Option("reprise", "resume", False, "true = ne refait que le travail manquant ou en échec transitoire."),
     Option("parallelisme", "concurrency", 300,
            "Nombre total de sites explorés en parallèle (tâches asyncio, tous processus confondus). Le délai par site, "
@@ -55,8 +57,15 @@ OPTIONS: list[Option] = [
            "(ex. \"https://app.panneaupocket.com/ville/325595414-sery-magneval-60800\")."),
     Option("max_sites_par_domaine", "max_par_domaine", 4,
            "Plafond de sites explorés simultanément sur un même domaine d'hébergement (ex. e-monsite.com)."),
-    Option("delai_par_site_s", "host_delay", 1.0,
-           "Délai minimal (secondes) entre deux requêtes vers un même site (politesse ; Crawl-delay de robots.txt prioritaire)."),
+    Option("delai_par_site_s", "host_delay", 0.5,
+           "Délai minimal (secondes) entre deux requêtes vers un même site (plancher ; Crawl-delay de robots.txt prioritaire)."),
+    Option("delai_adaptatif", "adaptive_delay", True,
+           "true = le délai par site s'adapte : moyenne du temps de réponse, doublé après un échec, 429 ou 5xx, puis "
+           "redescend après les succès (plafond delai_max_s). false = délai fixe delai_par_site_s."),
+    Option("delai_max_s", "delai_max", 10.0,
+           "Délai maximal (secondes) entre deux requêtes vers un même site lorsque le délai adaptatif est activé."),
+    Option("requetes_par_ip_max", "requetes_par_ip_max", 4,
+           "Requêtes simultanées au maximum vers une même adresse IP (hébergeurs mutualisés : plusieurs sites, un serveur)."),
     Option("timeout_s", "timeout", 15.0, "Délai maximal (secondes) d'une requête."),
     Option("redirections_max", "max_redirects", 5, "Nombre maximal de redirections suivies."),
     Option("niveaux_confiance_a_explorer", "include",
@@ -65,9 +74,11 @@ OPTIONS: list[Option] = [
            "Niveaux de confiance des sites à explorer : par défaut TOUS (sauf institutions non communales)."),
     Option("explorer_sites_certificat_invalide", "no_insecure_ssl", True,
            "true = explore aussi les sites à certificat invalide (signalés ssl_invalide).", invert=True),
-    Option("pages_max_par_site", "max_pages", 40, "Pages maximum lues par site."),
-    Option("profondeur_max", "max_depth", 2, "Profondeur maximale depuis la page d'accueil."),
-    Option("duree_max_par_site_s", "site_timeout", 180.0, "Durée maximale (secondes) par site. Pages lues au plus = durée ÷ delai_par_site_s (180 s ÷ 1,3 s ≈ 138 pages), quelle que soit pages_max_par_site."),
+    Option("pages_max_par_site", "max_pages", 500, "Pages maximum lues par site (défaut 500)."),
+    Option("profondeur_max", "max_depth", 5, "Profondeur maximale depuis la page d'accueil (défaut 5)."),
+    Option("duree_max_par_site_s", "site_timeout", 900.0,
+           "Durée maximale (secondes) par site (défaut 900). Pages lues au plus = durée ÷ delai_par_site_s (900 s ÷ 0,5 s = 1800 "
+           "avec le délai par défaut, moins si le délai adaptatif s'allonge), quelle que soit pages_max_par_site."),
     Option("utiliser_sitemap", "no_sitemap", False,
            "true = ajoute les premières pages de sitemap.xml à l'exploration (dans l'ordre du fichier).", invert=True),
     Option("reverifier_page_connue", "no_recheck_known", True,
@@ -174,7 +185,8 @@ def load(path: Path) -> dict:
             raise ConfigError(f"{path} : separateur_csv doit être \";\" ou \",\"")
         if o.dest == "export_mode" and value not in EXPORT_MODES:
             raise ConfigError(f"{path} : export_mode doit valoir {' ou '.join(EXPORT_MODES)}")
-        if o.dest in ("concurrency", "processes", "max_par_domaine", "max_par_processus", "max_pages", "max_depth") and value < 0:
+        if o.dest in ("concurrency", "processes", "max_par_domaine", "max_par_processus", "max_pages", "max_depth",
+                      "requetes_par_ip_max") and value < 0:
             raise ConfigError(f"{path} : « {key} » ne peut pas être négatif")
         out[o.dest] = (not value) if o.invert else value
     return out

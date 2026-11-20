@@ -1,0 +1,56 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Analyse{% endblock %}
+{% block fil %}{% set fil = [('/', 'Accueil'), ('/analyse', 'Analyse')] %}{% include 'web/_fil.html.j2' %}{% endblock %}
+{% block contenu %}
+<h1>Lancer une analyse</h1>
+{% if alerte %}<div class="fr-alert fr-alert--warning fr-mb-3w" role="alert"><p>{{ alerte }}</p></div>{% endif %}
+{% if erreur %}<div class="fr-alert fr-alert--error fr-mb-3w" role="alert"><p>{{ erreur }}</p></div>{% endif %}
+<form method="post" action="/analyse">
+  <fieldset class="fr-fieldset" id="champ-departements" aria-labelledby="legende-departements">
+    <legend class="fr-fieldset__legend" id="legende-departements">Départements à analyser</legend>
+    <div class="fr-fieldset__element" id="groupe-filtre" hidden>
+      <div class="fr-input-group">
+        <label class="fr-label" for="filtre-departements">Filtrer la liste</label>
+        <input class="fr-input" type="text" id="filtre-departements" autocomplete="off">
+      </div>
+    </div>
+    <div class="fr-fieldset__element"><div class="fr-checkbox-group">
+      <input type="checkbox" id="dep-tous" name="tous" value="1">
+      <label class="fr-label" for="dep-tous">Tous les départements</label>
+    </div></div>
+    {% for d in departements %}
+    <div class="fr-fieldset__element" data-departement="{{ d.code }} {{ d.nom }}"><div class="fr-checkbox-group">
+      <input type="checkbox" id="dep-{{ d.code }}" name="departement" value="{{ d.code }}">
+      <label class="fr-label" for="dep-{{ d.code }}">{{ d.code }} {{ d.nom }}
+        {% if d.nb_communes is not none %}<span class="fr-hint-text">{{ d.nb_communes }} communes à la dernière analyse</span>{% endif %}</label>
+    </div></div>
+    {% endfor %}
+  </fieldset>
+  <fieldset class="fr-fieldset" aria-labelledby="legende-options">
+    <legend class="fr-fieldset__legend" id="legende-options">Options</legend>
+    <div class="fr-fieldset__element"><div class="fr-checkbox-group">
+      <input type="checkbox" id="confirmer_tous" name="confirmer_tous" value="1">
+      <label class="fr-label" for="confirmer_tous">Je confirme l'analyse de toute la France (si « Tous les départements »)</label>
+    </div></div>
+    <div class="fr-fieldset__element"><div class="fr-checkbox-group">
+      <input type="checkbox" id="reprise" name="reprise" value="1">
+      <label class="fr-label" for="reprise">Reprendre l'analyse précédente
+        <span class="fr-hint-text">Ne refait que ce qui manque ou a échoué : plus rapide.</span></label>
+    </div></div>
+  </fieldset>
+  <button class="fr-btn" type="submit" id="lancer" aria-describedby="duree-indicative">Lancer</button>
+  <p class="fr-hint-text" id="duree-indicative">Durée indicative : de quelques minutes à une heure par département.</p>
+</form>
+<h2 class="fr-mt-6w fr-h4" id="reprises">Reprendre une analyse interrompue</h2>
+{% if reprises %}
+<div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Analyses interrompues ou en échec</caption>
+<thead><tr><th scope="col">Analyse</th><th scope="col">Début</th><th scope="col">Départements</th><th scope="col">Statut</th><th scope="col">Action</th></tr></thead>
+<tbody>{% for a in reprises %}{% set lib, modif = STATUTS_ANALYSE.get(a.statut, (a.statut, 'info')) %}<tr>
+  <th scope="row"><a href="/campagnes/{{ a.id }}">n° {{ a.id }}</a></th><td>{{ a.debut|date }}</td><td>{{ a.departements|depts }}</td>
+  <td><span class="fr-badge fr-badge--sm fr-badge--{{ modif }} fr-badge--no-icon">{{ lib }}</span></td>
+  <td><form method="post" action="/reprendre/{{ a.id }}">
+    <button class="fr-btn fr-btn--sm fr-btn--secondary" type="submit">Reprendre<span class="fr-sr-only"> l'analyse n° {{ a.id }}</span></button></form></td>
+</tr>{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<p>Aucune analyse interrompue.</p>{% endif %}
+{% endblock %}

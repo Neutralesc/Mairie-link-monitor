@@ -25,8 +25,10 @@ MINISTERES = ("Ministères<br>Transition écologique<br>Aménagement du territoi
 ALERTE_PAR_CLASSE = {"ok": "success", "alerte": "error", "attention": "warning"}
 
 
-# Menu principal (web uniquement) : (clé `active`, libellé, chemin).
-ENTREES_MENU = (("analyses", "Analyses", "/"), ("resultats", "Résultats", "/resultats"))
+# Menu principal (web uniquement) : (clé `active`, libellé, chemin). Mêmes entrées que web/base.html.j2.
+ENTREES_MENU = (("accueil", "Accueil", "/"), ("analyse", "Analyse", "/analyse"), ("suivi", "Suivi", "/suivi"),
+                ("rapports", "Rapports", "/rapports"), ("resultats", "Résultats", "/resultats"),
+                ("campagnes", "Historique", "/campagnes"))
 
 
 def menu_principal(active: str) -> tuple[str, str]:
@@ -73,7 +75,7 @@ def page(title: str, body: str, refresh: int | None = None, static_prefix: str =
          active: str = "") -> str:
     """Page complète. `refresh` est conservé pour compatibilité mais ne produit plus de meta refresh (RGAA 13.1) :
     l'actualisation automatique est un contrôle utilisateur placé dans le corps de l'accueil (webapp.home).
-    `active` ("analyses", "resultats" ou "") marque l'entrée courante du menu, affiché seulement sur le web."""
+    `active` (une clé de ENTREES_MENU, ou "") marque l'entrée courante du menu, affiché seulement sur le web."""
     sp = escape(static_prefix)
     titre = escape(title if title.endswith(SUFFIXE_TITRE) else f"{title} – {SUFFIXE_TITRE}")
     # Lien d'accueil seulement sur le web : un fichier écrit sur disque n'a pas de racine « / ».
@@ -200,7 +202,7 @@ def render(paths: DeptPaths, db: Path, static_prefix: str = STATIC_PREFIX_WEB) -
     body.append('<p class="fr-hint-text">« Aucun lien » n\'est certain que pour un site lu en entier (dans les limites fixées) '
                 "ou une page PanneauPocket lue. Les sites construits en JavaScript ne sont pas lus.</p>")
     return page(f"Compte rendu {paths.dept}", "\n".join(body), static_prefix=static_prefix,
-                active="analyses")  # suffixe ajouté par page()
+                active="rapports")  # suffixe ajouté par page()
 
 
 def write(paths: DeptPaths, db: Path) -> Path:

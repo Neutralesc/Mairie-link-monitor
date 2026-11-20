@@ -1,0 +1,16 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Analyse n° {{ a.id }}{% endblock %}
+{% block fil %}{% set fil = [('/', 'Accueil'), ('/campagnes', 'Historique'), ('', 'Analyse n° ' ~ a.id)] %}{% include 'web/_fil.html.j2' %}{% endblock %}
+{% block contenu %}
+{% set lib, modif = STATUTS_ANALYSE.get(a.statut, (a.statut, 'info')) %}
+<h1>Analyse n° {{ a.id }}</h1>
+<p><span class="fr-badge fr-badge--{{ modif }}">{{ lib }}</span> Début : {{ a.debut|date }}. Fin : {{ a.fin|date if a.fin else '-' }}.</p>
+{% if a.statut == 'annulee' %}<div class="fr-callout"><p class="fr-callout__text">Cette analyse a été arrêtée : les résultats sont partiels. Elle peut être reprise depuis la page <a href="/analyse">Analyse</a>.</p></div>{% endif %}
+{% if a.statut == 'echec' %}<div class="fr-alert fr-alert--error fr-mb-3w"><p>Cette analyse s'est terminée en échec. Consultez le journal ci-dessous.</p></div>{% endif %}
+<h2 class="fr-h4 fr-mt-3w">Départements</h2>
+{% if depts %}
+<ul>{% for d in depts %}<li>{% if d.lien %}<a href="/rapports/{{ d.code }}">{{ d.code }} {{ d.nom }}</a>{% else %}{{ d.libelle }}{% endif %}</li>{% endfor %}</ul>
+{% else %}<p>Aucun département enregistré pour cette analyse.</p>{% endif %}
+<h2 class="fr-h4">Journal</h2>
+{% if a.journal %}<pre class="mlm-journal">{{ a.journal }}</pre>{% else %}<p>Journal vide.</p>{% endif %}
+{% endblock %}

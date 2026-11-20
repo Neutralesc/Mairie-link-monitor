@@ -149,7 +149,8 @@ class PipelineTests(unittest.TestCase):
             return real(paths, *a, **k)
         with mock.patch.object(results, "export_dept", spy), contextlib.redirect_stdout(io.StringIO()):
             rc = self.run_main("60", "1", "--use-cached-cog")
-        self.assertEqual((rc, order), (0, ["60", "01", "60", "01"]))   # fin de chaque département, puis après PanneauPocket
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(order), ["01", "60"])                  # écrit une fois par département, à sa fin
         self.assertTrue((self.root / "resultats" / "liens_tous_departements.csv").exists())
 
     def test_migrate_legacy_depuis_un_autre_dossier(self):

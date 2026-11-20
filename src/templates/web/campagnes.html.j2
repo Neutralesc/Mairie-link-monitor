@@ -1,0 +1,16 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Historique{% endblock %}
+{% block fil %}{% set fil = [('/', 'Accueil'), ('/campagnes', 'Historique')] %}{% include 'web/_fil.html.j2' %}{% endblock %}
+{% block contenu %}
+<h1>Historique des analyses</h1>
+{% if analyses %}
+<div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+<table><caption>Analyses, de la plus récente à la plus ancienne</caption>
+<thead><tr><th scope="col">Analyse</th><th scope="col">Début</th><th scope="col">Fin</th><th scope="col">Statut</th><th scope="col">Départements</th></tr></thead>
+<tbody>{% for a in analyses %}{% set lib, modif = STATUTS_ANALYSE.get(a.statut, (a.statut, 'info')) %}<tr>
+  <th scope="row"><a href="/campagnes/{{ a.id }}">n° {{ a.id }}</a></th><td>{{ a.debut|date }}</td><td>{{ a.fin|date if a.fin else '-' }}</td>
+  <td><span class="fr-badge fr-badge--sm fr-badge--{{ modif }} fr-badge--no-icon">{{ lib }}</span></td>
+  <td>{{ a.departements|depts }}</td>
+</tr>{% endfor %}</tbody></table></div></div></div></div>
+{% else %}<p>Aucune analyse pour le moment.</p>{% endif %}
+{% endblock %}

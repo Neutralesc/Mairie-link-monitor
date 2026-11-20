@@ -1,0 +1,4 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Rapport : {{ synth.departement.nom }}{% endblock %}
+{% block fil %}{% set fil = [('/', 'Accueil'), ('/rapports', 'Rapports'), ('', synth.departement.nom)] %}{% include 'web/_fil.html.j2' %}{% endblock %}
+{% block contenu %}{% include 'web/_compte_rendu.html.j2' %}{% endblock %}

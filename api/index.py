@@ -128,6 +128,18 @@ class _Lecture:
     def has_csv_all(self) -> bool:
         return self._appeler("has_csv_all", self._source.has_csv_all)
 
+    def synthese(self, dept: str) -> dict | None:
+        return self._appeler("synthese", self._source.synthese, dept)
+
+    def resumes(self) -> list[dict]:
+        return self._appeler("resumes", self._source.resumes)
+
+    def analyses(self, limit: int = 50) -> list[dict]:
+        return self._appeler("analyses", self._source.analyses, limit)
+
+    def analyse(self, analysis_id: int) -> dict | None:
+        return self._appeler("analyse", self._source.analyse, analysis_id)
+
 
 def _handler_indisponible(titre: str, lignes: list[str]):
     """Classe qui répond 503 à toute méthode avec une page DSFR (contenu fixe, sans valeur de configuration)."""

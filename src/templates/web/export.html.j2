@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="fr" data-fr-scheme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+  <title>Compte rendu {{ synth.departement.nom }} - Veille des liens Vos questions</title>
+  <style>{{ css|safe }}</style>
+</head>
+<body>
+  <header role="banner" class="fr-header">
+    <div class="fr-header__body"><div class="fr-container"><div class="fr-header__body-row">
+      <div class="fr-header__brand">
+        <div class="fr-header__brand-top"><div class="fr-header__logo"><p class="fr-logo">Ministères<br>Transition écologique<br>Aménagement du territoire<br>Transports<br>Ville et Logement</p></div></div>
+        <div class="fr-header__service">
+          <p class="fr-header__service-title">Veille des liens Vos questions</p>
+          <p class="fr-header__service-tagline">Liens vers vosquestions.ecologie-territoires.gouv.fr sur les sites des mairies</p>
+        </div>
+      </div>
+    </div></div></div>
+  </header>
+  <main class="fr-container fr-my-4w">
+    {% include 'web/_compte_rendu.html.j2' %}
+  </main>
+  <footer class="fr-footer" role="contentinfo">
+    <div class="fr-container"><div class="fr-footer__body">
+      <div class="fr-footer__brand"><p class="fr-logo">Ministères<br>Transition écologique<br>Aménagement du territoire<br>Transports<br>Ville et Logement</p></div>
+      <div class="fr-footer__content"><p class="fr-footer__content-desc">Fichier autonome généré par l'outil de veille. Il ne garantit pas l'exhaustivité des résultats : chaque compte rendu indique ses limites.</p></div>
+    </div></div>
+  </footer>
+</body>
+</html>

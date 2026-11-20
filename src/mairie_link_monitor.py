@@ -311,7 +311,10 @@ def cmd_run(args) -> int:
             commune=args.commune, contact=args.contact, resume=args.resume, use_sitemap=not args.no_sitemap,
             recheck_known=not args.no_recheck_known, retry_failed=not args.no_retry,
             max_par_domaine=args.max_par_domaine, max_par_processus=args.max_par_processus,
-            dns_simultanees=args.dns_simultanees, metrics=not args.no_metrics), on_dept_done=dept_done)
+            dns_simultanees=args.dns_simultanees, metrics=not args.no_metrics,
+            adaptive_delay=getattr(args, "adaptive_delay", True), delai_max=getattr(args, "delai_max", 10.0),
+            requetes_par_ip_max=getattr(args, "requetes_par_ip_max", 4)),
+            on_dept_done=dept_done)
         if rc != 0:
             failures.append("crawl")
     if "plateformes" in args.steps and active:
@@ -537,7 +540,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--page-panneaupocket", dest="pages_panneaupocket", action="append", default=[],
                    help="page PanneauPocket à lire en plus (répétable)")
     g.add_argument("--max-par-domaine", type=int, default=4, help="sites simultanés max sur un même domaine d'hébergement")
-    g.add_argument("--host-delay", type=float, default=1.0, help="délai minimal (s) entre requêtes vers un même site")
+    g.add_argument("--host-delay", type=float, default=0.5, help="délai minimal (s) entre requêtes vers un même site")
+    g.add_argument("--delai-fixe", dest="adaptive_delay", action="store_false",
+                   help="délai fixe par site (--host-delay) : pas d'adaptation au temps de réponse ni aux erreurs")
+    g.add_argument("--delai-adaptatif", dest="adaptive_delay", action="store_true", help="délai adaptatif (défaut)")
+    g.add_argument("--delai-max", type=float, default=10.0, help="délai maximal (s) par site en mode adaptatif")
+    g.add_argument("--requetes-par-ip-max", type=int, default=4,
+                   help="requêtes simultanées au maximum vers une même adresse IP (hébergeurs mutualisés)")
     g.add_argument("--timeout", type=float, default=15.0)
     g.add_argument("--max-redirects", type=int, default=5, help="(étape verify)")
     g.add_argument("--limit-urls", type=int, default=0, help="(étape verify) N premières URL seulement (essai)")

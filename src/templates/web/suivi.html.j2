@@ -1,0 +1,29 @@
+{% extends 'web/base.html.j2' %}
+{% block titre %}Suivi{% endblock %}
+{% block fil %}{% set fil = [('/', 'Accueil'), ('/suivi', 'Suivi')] %}{% include 'web/_fil.html.j2' %}{% endblock %}
+{% block contenu %}
+{% set p = etat.progression %}
+<h1>Suivi de l'analyse</h1>
+<div id="suivi">
+  <p>État : <strong id="etat-statut">{{ ETATS_ANALYSE.get(etat.statut, etat.statut) }}</strong>
+    <span id="etat-campagne">{% if etat.campagne_id %}(analyse <a href="/campagnes/{{ etat.campagne_id }}">n° {{ etat.campagne_id }}</a>){% endif %}</span></p>
+  <div id="etat-erreur" role="alert">{% if etat.erreur %}<div class="fr-alert fr-alert--error fr-mb-3w"><p>{{ etat.erreur }}</p></div>{% endif %}</div>
+  <div id="etat-message" role="status">{% if etat.message %}<div class="fr-alert fr-alert--info fr-mb-3w"><p>{{ etat.message }}</p></div>{% endif %}</div>
+  <p><label for="barre">Progression (sites traités)</label><br>
+    <progress id="barre" max="{{ p.sites_total or 1 }}" value="{{ p.sites_traites or 0 }}">{{ p.sites_traites or 0 }}</progress></p>
+  <div class="fr-table"><div class="fr-table__wrapper"><div class="fr-table__container"><div class="fr-table__content">
+  <table><caption>Chiffres de l'analyse en cours</caption>
+    <thead><tr><th scope="col">Mesure</th><th scope="col">Valeur</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Sites traités</th><td><span id="n-traites">{{ p.sites_traites if p.sites_traites is not none else '-' }}</span> / <span id="n-total">{{ p.sites_total if p.sites_total is not none else '-' }}</span></td></tr>
+      <tr><th scope="row">Pages visitées</th><td id="n-pages">{{ p.pages_visitees if p.pages_visitees is not none else '-' }}</td></tr>
+      <tr><th scope="row">Liens confirmés</th><td id="n-liens">{{ p.liens_confirmes if p.liens_confirmes is not none else '-' }}</td></tr>
+      <tr><th scope="row">Temps écoulé (secondes)</th><td id="t-ecoule">{{ p.ecoule_s if p.ecoule_s is not none else '-' }}</td></tr>
+      <tr><th scope="row">Temps restant estimé (secondes)</th><td id="t-restant">{{ p.restant_estime_s if p.restant_estime_s is not none else '-' }}</td></tr>
+    </tbody></table></div></div></div></div>
+  <form method="post" action="/arreter">
+    <button class="fr-btn fr-btn--secondary" type="submit" id="btn-arreter" {% if not (etat.actif and etat.genre == 'campagne') %}disabled{% endif %}>Arrêter</button></form>
+  <p class="fr-hint-text fr-mt-1w">Une analyse arrêtée est enregistrée comme interrompue et peut être reprise depuis la page Analyse.</p>
+  <p><a class="fr-btn fr-btn--tertiary" href="/suivi">Actualiser</a></p>
+</div>
+{% endblock %}
