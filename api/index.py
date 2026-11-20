@@ -125,6 +125,12 @@ class _Lecture:
     def liens(self, dept: str | None = None) -> list[dict]:
         return self._appeler("liens", self._source.liens, dept)
 
+    def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        return self._appeler("tous_les_liens", self._source.tous_les_liens, q, dept, limit, offset)
+
+    def nouveaux_liens(self, depuis, limit: int) -> tuple[list[dict], int]:
+        return self._appeler("nouveaux_liens", self._source.nouveaux_liens, depuis, limit)
+
     def csv_all(self) -> bytes | None:
         return self._appeler("csv_all", self._source.csv_all)
 

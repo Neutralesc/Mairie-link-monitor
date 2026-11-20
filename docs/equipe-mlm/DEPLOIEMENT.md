@@ -120,6 +120,28 @@ dernière publication, recherche), la page de chaque département (`/departement
 (`/departement/<code>.csv`), la page « À propos » (`/a-propos`) et les ressources graphiques. Toute autre adresse reste
 protégée par défaut, et les formulaires ne sont jamais acceptés sur ces pages.
 
+Sur la racine, sous le tableau des départements, le tableau « Tous les liens trouvés » liste chaque lien confirmé
+(une ligne par page de commune : département, code INSEE, nom de la commune, page où figure le lien, adresse visée),
+avec recherche par nom ou code INSEE, filtre par département et pages de 100 lignes. Le lien « Télécharger tout (CSV) »
+(`/resultats.csv`, mêmes filtres `q` et `dep`) exporte ces lignes ; il est plafonné à 200 000 lignes. Seuls les liens
+confirmés sont listés, jamais les cas « à vérifier » ni les erreurs.
+
+**Nouveaux liens.** Au-dessus du tableau complet, la section « Nouveaux liens » liste les liens confirmés apparus
+depuis moins de 30 jours (constante `FENETRE_NOUVEAUX_JOURS`), du plus récent au plus ancien, 50 au plus. Le tableau
+complet affiche la date « Apparu le » et le repère « nouveau » ; le CSV porte la colonne `apparu_le`. Comment cela
+fonctionne :
+
+- Postgres : la table `liens_vus` garde, pour chaque lien (département, code INSEE, page, cible), la date de sa première
+  apparition. Elle est alimentée par la publication (`publish`) : un lien déjà connu n'est jamais réinséré, un lien
+  disparu puis réapparu garde sa première date, rien n'est supprimé. Republier des résultats identiques ne crée aucun
+  nouveau lien.
+- Amorçage : à la création de la table (première mise à jour de la base après cette version), les liens déjà publiés
+  sont enregistrés comme non nouveaux, datés de leur publication. Seuls les liens apparus ensuite sont « nouveaux ».
+  Un département publié pour la première fois après cette mise à jour voit tous ses liens marqués nouveaux.
+- Local (FileSource) : la table `liens_vus` est dans `data/historique.sqlite`. Faute de point d'accroche dans le
+  moteur de crawl, elle est mise à jour à chaque lecture ; la date d'un nouveau lien est donc celle de la première
+  lecture après le contrôle. Les pages publiques en local écrivent donc dans cette base.
+
 Accès à l'administration : la page publique propose un lien « Espace réservé » vers `/analyse`, qui demande le mot de
 passe. Le navigateur qui a fourni le bon mot de passe voit ensuite le menu complet sur la racine et sur les pages
 publiques. Un identifiant invalide sur une page publique est simplement traité comme un visiteur.

@@ -27,6 +27,7 @@ import time
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from jinja2 import Environment, FileSystemLoader
@@ -55,6 +56,15 @@ TEMPLATES = Path(__file__).resolve().parent / "templates"
 CODE_URL = r"[0-9AB]{2,3}"       # code de département dans une adresse
 RESULTATS_PAR_PAGE = 100
 RECHERCHE_MAX = 80               # caractères retenus pour la recherche libre
+RECHERCHE_PUBLIQUE_MAX = 100     # recherche de l'accueil public (départements et communes), tronquée au-delà
+LIENS_PAR_PAGE = 100             # tableau « Tous les liens trouvés » de l'accueil public
+LIENS_CSV_MAX = 200_000          # plafond du CSV « tous les liens » ; au-delà, l'export est tronqué et l'en-tête le signale
+ANCRE_LIENS = "#tous-les-liens"
+CHAMPS_TOTAUX = ("nb_communes", "nb_communes_avec_lien", "nb_communes_a_verifier", "nb_communes_sans_lien",
+                 "nb_communes_non_analysables")
+CHAMPS_LIENS_CSV = ["departement_code", "departement", "code_insee", "commune", "url_page_source", "url_cible", "apparu_le"]
+FENETRE_NOUVEAUX_JOURS = 30      # un lien est « nouveau » pendant ce nombre de jours après sa première apparition
+NOUVEAUX_AFFICHES_MAX = 50       # lignes de la section « Nouveaux liens » de l'accueil public
 LIBELLE_RESULTATS = "Communes dont le site contient un lien vers Vos Questions"
 PROGRESSION_RE = re.compile(r"total (\d+)/(\d+)")  # « [13] 25/130 sites ; total 25/130 » : dernière occurrence
 MSG_ECHEC = "L'analyse s'est terminée en échec : consultez le journal."
@@ -210,6 +220,12 @@ def _liste(v) -> list[str]:
     return [] if not v else [v] if isinstance(v, str) else list(v)
 
 
+def _tronquer(valeur, longueur: int = 70) -> str:
+    """Affichage raccourci d'une URL longue ; la valeur complète reste dans l'attribut href."""
+    texte = str(valeur or "")
+    return texte if len(texte) <= longueur else texte[:longueur - 1] + "…"
+
+
 def _libelle_depts(valeur) -> str:
     return ", ".join("toute la France" if c == "all" else c for c in _liste(valeur))
 
@@ -224,6 +240,7 @@ _ENV.filters["est_http"] = _est_http
 _ENV.filters["date"] = lambda v: str(v or "")[:16].replace("T", " ")
 _ENV.filters["depts"] = _libelle_depts
 _ENV.filters["echappe"] = _echappe_valeur
+_ENV.filters["tronquer"] = _tronquer
 _ENV.globals.update(STATUTS=STATUTS, STATUTS_ANALYSE=STATUTS_ANALYSE, ETATS_ANALYSE=ETATS_ANALYSE)
 
 
@@ -242,6 +259,8 @@ def route_publique(chemin: str) -> tuple[str, str] | None:
         return ("accueil", "")
     if chemin == "/a-propos":
         return ("apropos", "")
+    if chemin == "/resultats.csv":
+        return ("resultats_csv", "")
     if m := re.fullmatch(rf"/departement/({CODE_URL})(\.csv)?", chemin):
         return ("csv" if m.group(2) else "departement", m.group(1))
     return None
@@ -344,6 +363,93 @@ def csv_communes(synth: dict) -> bytes:
                            _neutraliser(STATUTS.get(c.get("statut"), (c.get("statut"), ""))[0]),
                            _neutraliser(liens), _neutraliser(c.get("detail"))])
     return tampon.getvalue().encode("utf-8-sig")
+
+
+def horloge() -> datetime:
+    """Heure courante (UTC). Fonction à part pour que les tests fixent le moment (fenêtre des nouveaux liens)."""
+    return datetime.now(timezone.utc)
+
+
+def est_recent(lien: dict, depuis: datetime) -> bool:
+    """Lien nouveau dont la première apparition est à `depuis` ou après. Les liens « de base » (nouveau = False) ne le sont jamais."""
+    return bool(lien.get("nouveau")) and bool(lien.get("premiere_vue")) and datetime.fromisoformat(lien["premiere_vue"]) >= depuis
+
+
+def csv_liens(lignes: list[dict]) -> bytes:
+    """CSV de tous les liens confirmés (une ligne par lien), même format que les autres CSV : « ; », BOM, neutralisé."""
+    tampon = io.StringIO()
+    ecrivain = csv.writer(tampon, delimiter=";", lineterminator="\r\n")
+    ecrivain.writerow(CHAMPS_LIENS_CSV)
+    noms = _departements().DEPARTEMENTS
+    for r in lignes:
+        ecrivain.writerow([_neutraliser(r["dept"]), _neutraliser(noms.get(r["dept"], "")), _neutraliser(r["code_insee"]),
+                           _neutraliser(r["nom_commune"]), _neutraliser(r["url_page_source"]),
+                           _neutraliser(r["url_cible"]), _neutraliser(r.get("premiere_vue") or "")])
+    return tampon.getvalue().encode("utf-8-sig")
+
+
+def parametres_liens(params: dict[str, list[str]], codes: list[str]) -> tuple[str, str, str, int]:
+    """(q, dep, alerte, page) de l'accueil public. `dep` doit être un code publié, sinon il est ignoré (avec alerte) ;
+    `page` est un entier positif, sinon 1. La recherche est tronquée à RECHERCHE_PUBLIQUE_MAX caractères."""
+    q = params.get("q", [""])[0][:RECHERCHE_PUBLIQUE_MAX].strip()
+    dep, alerte = params.get("dep", [""])[0].strip().upper(), ""
+    if dep and not (re.fullmatch(CODE_URL, dep) and dep in codes):
+        dep, alerte = "", "Département inconnu : le filtre par département n'est pas appliqué."
+    brut = params.get("page", ["1"])[0].strip()
+    page = int(brut) if re.fullmatch(r"[0-9]{1,6}", brut) else 1
+    return q, dep, alerte, max(page, 1)
+
+
+def url_liens(q: str, dep: str, page_num: int) -> str:
+    """Adresse de l'accueil public avec les filtres et l'ancre du tableau (valeurs encodées)."""
+    params = {"page": str(page_num)}
+    if dep:
+        params["dep"] = dep
+    if q:
+        params["q"] = q
+    return "/?" + urlencode(params) + ANCRE_LIENS
+
+
+def url_csv_liens(q: str, dep: str) -> str:
+    params = {k: v for k, v in (("q", q), ("dep", dep)) if v}
+    return "/resultats.csv" + ("?" + urlencode(params) if params else "")
+
+
+def pagination_liens(q: str, dep: str, courante: int, total: int) -> str:
+    """Pagination DSFR du tableau public : libellés accessibles, rel prev/next, ancre sur le titre de section."""
+    def lien(p: int, texte: str, classes: str, attributs: str) -> str:
+        href = html.escape(url_liens(q, dep, p), quote=True)
+        return f'<li><a class="fr-pagination__link{classes}" href="{href}"{attributs}>{texte}</a></li>'
+
+    items = []
+    if courante > 1:
+        items.append(lien(courante - 1, "Précédent", " fr-pagination__link--prev fr-pagination__link--lg-label",
+                          f' rel="prev" aria-label="Page précédente, page {courante - 1}"'))
+    trou = False
+    for p in range(1, total + 1):
+        if p in (1, total) or abs(p - courante) <= 2:
+            trou = False
+            attributs = f' aria-label="Page {p}"' + (' aria-current="page"' if p == courante else "")
+            items.append(lien(p, str(p), "", attributs))
+        elif not trou:
+            trou = True
+            items.append("<li>…</li>")
+    if courante < total:
+        items.append(lien(courante + 1, "Suivant", " fr-pagination__link--next fr-pagination__link--lg-label",
+                          f' rel="next" aria-label="Page suivante, page {courante + 1}"'))
+    return ('<nav class="fr-pagination" aria-label="Pagination des liens">'
+            f'<ul class="fr-pagination__list">{"".join(items)}</ul></nav>')
+
+
+def tranche_liens(source: PublicationSource, q: str, dep: str, numero: int) -> tuple[list[dict], int, int, int]:
+    """(lignes de la page, total, page retenue, nombre de pages). Une page au-delà de la fin renvoie la dernière."""
+    limite = LIENS_PAR_PAGE
+    lignes, total = source.tous_les_liens(q, dep or None, limite, (numero - 1) * limite)
+    pages = max(1, -(-total // limite))
+    if numero > pages:
+        numero = pages
+        lignes, total = source.tous_les_liens(q, dep or None, limite, (numero - 1) * limite)
+    return lignes, total, numero, pages
 
 
 # ----------------------------------------------------------------- suivi (API /api/etat)
@@ -497,11 +603,13 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
         def redirect(self, location: str):
             self.send(303, "", "text/plain; charset=utf-8", {"Location": location})
 
-        def csv_reponse(self, data: bytes, nom: str):
-            extra = {"Content-Disposition": f'attachment; filename="{nom}"'}
+        def csv_reponse(self, data: bytes, nom: str, en_tetes: dict | None = None):
+            extra = {"Content-Disposition": f'attachment; filename="{nom}"', **(en_tetes or {})}
             if len(data) > CSV_GZIP_MIN_OCTETS and self.accepte_gzip():
+                # Publique : la réponse garde « Vary: Authorization » en plus d'Accept-Encoding (pas de cache partagé).
+                vary = "Accept-Encoding, Authorization" if self.publique else "Accept-Encoding"
                 return self.send(200, gzip.compress(data, mtime=0), MIME_CSV,
-                                 {**extra, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+                                 {**extra, "Content-Encoding": "gzip", "Vary": vary})
             return self.send(200, data, MIME_CSV, extra)
 
         # --- contrôles communs ---
@@ -672,6 +780,8 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
                     return self.public_accueil(params, admin)
                 if genre == "apropos":
                     return self.public_apropos(admin)
+                if genre == "resultats_csv":
+                    return self.public_liens_csv(params)
                 return self.public_departement(code, admin, csv=genre == "csv")
             except SourceIndisponible:
                 self.public_erreur(503, "Service indisponible", MSG_PUBLIC_INDISPONIBLE, admin)
@@ -683,10 +793,35 @@ def make_handler(root: Path, runner, password: str, source: PublicationSource | 
             self.send(status, _rendre_public(modele, admin=admin, **ctx))
 
         def public_accueil(self, params: dict, admin: bool):
-            q = params.get("q", [""])[0][:RECHERCHE_MAX].strip()
             publies = [r for r in source.resumes() if re.fullmatch(CODE_URL, str(r.get("code", "")))]
-            self.page_publique("accueil", admin, actif="accueil", total=len(publies),
-                               resumes=filtrer_departements(publies, q), q=q, derniere=derniere_publication(publies))
+            q, dep, alerte, numero = parametres_liens(params, [r["code"] for r in publies])
+            lignes, total_liens, numero, pages = tranche_liens(source, q, dep, numero)
+            depuis = horloge() - timedelta(days=FENETRE_NOUVEAUX_JOURS)
+            nouveaux, total_nouveaux = source.nouveaux_liens(depuis, NOUVEAUX_AFFICHES_MAX)
+            noms = _departements().DEPARTEMENTS
+            totaux = {cle: sum(int(r.get(cle) or 0) for r in publies) for cle in CHAMPS_TOTAUX}
+            self.page_publique(
+                "accueil", admin, actif="accueil", total=len(publies), resumes=filtrer_departements(publies, q),
+                q=q, derniere=derniere_publication(publies), totaux=totaux,
+                nouveaux=[{"apparu_le": r.get("premiere_vue") or "", "departement": f"{noms.get(r['dept'], '')} ({r['dept']})",
+                           "code_insee": r["code_insee"], "commune": r["nom_commune"],
+                           "url_page_source": r["url_page_source"]} for r in nouveaux],
+                total_nouveaux=total_nouveaux, fenetre=FENETRE_NOUVEAUX_JOURS, nouveaux_max=NOUVEAUX_AFFICHES_MAX,
+                liens=[{"departement": f"{noms.get(r['dept'], '')} ({r['dept']})", "code_insee": r["code_insee"],
+                        "commune": r["nom_commune"], "url_page_source": r["url_page_source"],
+                        "url_cible": r["url_cible"], "apparu_le": r.get("premiere_vue") or "",
+                        "recent": est_recent(r, depuis)} for r in lignes],
+                liens_total=total_liens, liens_page=numero, liens_pages=pages, dep=dep, alerte_liens=alerte,
+                liens_pagination=Markup(pagination_liens(q, dep, numero, pages)) if pages > 1 else "",
+                depts_choix=[{"code": r["code"], "libelle": f"{r['code']} {noms.get(r['code'], r.get('nom', ''))}"}
+                             for r in publies],
+                url_csv=url_csv_liens(q, dep))
+
+        def public_liens_csv(self, params: dict):
+            q, dep, _alerte, _numero = parametres_liens(params, source.depts())
+            lignes, total = source.tous_les_liens(q, dep or None, LIENS_CSV_MAX, 0)
+            en_tetes = {"X-Resultats-Tronques": "oui"} if total > LIENS_CSV_MAX else {}
+            return self.csv_reponse(csv_liens(lignes), "liens_confirmes.csv", en_tetes)
 
         def public_apropos(self, admin: bool):
             try:

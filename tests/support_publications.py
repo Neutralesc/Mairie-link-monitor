@@ -83,7 +83,7 @@ class PgSchemaTestCase(unittest.TestCase):
     def vider_tables(self) -> None:
         import psycopg
         with psycopg.connect(self.url, autocommit=True) as conn:
-            conn.execute("TRUNCATE publications, publication_globale, analyses RESTART IDENTITY")
+            conn.execute("TRUNCATE publications, publication_globale, analyses, liens_vus RESTART IDENTITY")
 
 
 def construire_racine(root: Path) -> None:

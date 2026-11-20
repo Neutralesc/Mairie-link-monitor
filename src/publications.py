@@ -9,11 +9,13 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
 import coverage
 import history
+import liens_vus
 import report as report_module
 import results
 from layout import DeptPaths
@@ -51,10 +53,67 @@ def trier_liens(rows: list[dict]) -> list[dict]:
                                        r["code_insee"]))
 
 
+def liens_confirmes(dept: str, synth) -> list[dict]:
+    """Une entrée par lien confirmé d'un département, d'après une synthèse (synthese.synthese_departement).
+
+    Seules les communes au statut « lien_confirme » comptent ; un lien écarté (verification « faux ») est exclu. Doublon
+    (commune, page, cible) supprimé. Une synthèse vide ou mal formée donne une liste vide, sans erreur.
+    """
+    communes = synth.get("communes") if isinstance(synth, dict) else None
+    sortie: list[dict] = []
+    vus: set[tuple[str, str, str]] = set()
+    for c in communes if isinstance(communes, list) else []:
+        if not isinstance(c, dict) or c.get("statut") != "lien_confirme":
+            continue
+        code, nom = str(c.get("code_insee") or ""), str(c.get("nom") or "")
+        liens = c.get("liens_confirmes")
+        for lien in liens if isinstance(liens, list) else []:
+            if not isinstance(lien, dict) or lien.get("verification") == "faux":
+                continue
+            page, cible = str(lien.get("url_page_source") or ""), str(lien.get("url_cible") or "")
+            if not page or (code, page, cible) in vus:
+                continue
+            vus.add((code, page, cible))
+            sortie.append({"dept": dept, "code_insee": code, "nom_commune": nom,
+                           "url_page_source": page, "url_cible": cible})
+    return sortie
+
+
+def trier_liens_confirmes(rows: list[dict]) -> list[dict]:
+    """Tri commun des liens confirmés : département, commune (sans accents ni casse), code INSEE, page, cible."""
+    return sorted(rows, key=lambda r: (r["dept"], _sans_accents(r["nom_commune"]), r["nom_commune"].casefold(),
+                                       r["code_insee"], r["url_page_source"], r["url_cible"]))
+
+
+def selection_liens(rows: list[dict], q: str, limit: int, offset: int) -> tuple[list[dict], int]:
+    """Filtre `q` (nom de commune ou code INSEE, sans accents ni casse), tri commun, puis tranche.
+
+    Retourne (tranche, total des lignes filtrées). `limit` et `offset` sont des entiers positifs ou nuls.
+    """
+    cle = _sans_accents(q or "")
+    if cle:
+        rows = [r for r in rows if cle in _sans_accents(r["nom_commune"]) or cle in _sans_accents(r["code_insee"])]
+    triees = trier_liens_confirmes(rows)
+    return triees[offset:offset + limit], len(triees)
+
+
+def selection_nouveaux(rows: list[dict], depuis: datetime, limit: int) -> tuple[list[dict], int]:
+    """Liens nouveaux (nouveau et première vue >= depuis), du plus récent au plus ancien, puis département et commune."""
+    retenus = [r for r in rows if r.get("nouveau") and datetime.fromisoformat(r["premiere_vue"]) >= depuis]
+    triees = sorted(trier_liens_confirmes(retenus), key=lambda r: r["premiere_vue"], reverse=True)  # tri stable
+    return triees[:limit], len(triees)
+
+
 class PublicationSource(Protocol):
     def depts(self) -> list[str]: ...                    # codes triés
     # communes avec lien : {dept, code_insee, nom_commune, url_page}, triées ; dept=None = tous ; inconnu = []
     def liens(self, dept: str | None = None) -> list[dict]: ...
+    # liens confirmés, une ligne par lien : {dept, code_insee, nom_commune, url_page_source, url_cible}. Filtre q
+    # (commune ou code INSEE) et dept (None = tous), tri commun ; renvoie la tranche [offset, offset+limit[ et le total
+    def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]: ...
+    # liens nouvellement vus (nouveau = True, première vue >= depuis), plus récents d'abord : (tranche, total).
+    # Chaque lien porte premiere_vue (ISO) et nouveau, comme dans tous_les_liens.
+    def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]: ...
     # None si département inconnu ; report=False / csv=False évitent de produire les champs lourds (alors vides)
     def get(self, dept: str, *, report: bool = True, csv: bool = True) -> Publication | None: ...
     def csv_all(self) -> bytes | None: ...               # liens_tous_departements.csv, None s'il n'existe pas
@@ -115,6 +174,36 @@ class FileSource:
             rows.extend({"dept": d, "code_insee": r["code_insee"], "nom_commune": names.get(r["code_insee"], ""),
                          "url_page": r["url_page"]} for r in trouvees)
         return trier_liens(rows)
+
+    def _lignes_publiees(self) -> list[dict]:
+        """Tous les liens confirmés des départements, avec premiere_vue et nouveau.
+
+        Enregistre au passage les liens inconnus dans data/historique.sqlite (table liens_vus, voir liens_vus.py) :
+        c'est la seule écriture de cette source, idempotente, faite à la lecture faute de hook dans le crawl.
+        """
+        db = history.db_path(self.root)
+        lignes: list[dict] = []
+        bases: dict[str, str] = {}
+        for d in self.depts():
+            synth = self.synthese(d)
+            if synth is None:
+                continue
+            lignes.extend(liens_confirmes(d, synth))
+            ctl = history.controls(db, d)
+            bases[d] = ctl[0]["date"] if ctl else ""
+        maintenant = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        vus = liens_vus.synchroniser(db, lignes, bases, maintenant)
+        return [{**l, "premiere_vue": vus[liens_vus.cle(l)][0], "nouveau": vus[liens_vus.cle(l)][1]} for l in lignes]
+
+    def tous_les_liens(self, q: str, dept: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Liens confirmés des départements publiés (relus des synthèses à chaque appel : source locale, sans cache)."""
+        lignes = self._lignes_publiees()
+        if dept is not None:
+            lignes = [l for l in lignes if l["dept"] == dept]
+        return selection_liens(lignes, q, limit, offset)
+
+    def nouveaux_liens(self, depuis: datetime, limit: int) -> tuple[list[dict], int]:
+        return selection_nouveaux(self._lignes_publiees(), depuis, limit)
 
     def csv_all(self) -> bytes | None:
         f = self.root / "resultats" / CSV_TOUS
